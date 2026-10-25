@@ -134,6 +134,7 @@ export class ThemeManager {
     const tokens = this.getTokens();
     const root = document.documentElement;
     root.style.setProperty('--gcal-bg', tokens.background);
+    root.style.setProperty('--gcal-background', tokens.background);
     root.style.setProperty('--gcal-surface', tokens.surface);
     root.style.setProperty('--gcal-surface-hover', tokens.surfaceHover);
     root.style.setProperty('--gcal-border', tokens.border);

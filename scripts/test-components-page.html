@@ -1,0 +1,68 @@
+
+    <!DOCTYPE html>
+    <html data-theme="dark">
+      <head>
+        <meta charset="utf-8">
+        <title>Google Calendar Desktop Test</title>
+        <link href="https://fonts.googleapis.com/css2?family=Google+Sans:wght@400;500;700&display=swap" rel="stylesheet">
+        <style>
+          :root {
+            --gcal-background: #1f1f1f;
+            --gcal-bg: #1f1f1f;
+            --gcal-surface: #282a2d;
+            --gcal-surface-hover: #35373b;
+            --gcal-border: #444746;
+            --gcal-text: #e8eaed;
+            --gcal-secondary-text: #9aa0a6;
+            --gcal-accent: #8ab4f8;
+            --gcal-selected: #004a77;
+          }
+          [data-theme="light"] {
+            --gcal-background: #ffffff;
+            --gcal-bg: #ffffff;
+            --gcal-surface: #ffffff;
+            --gcal-surface-hover: #f1f3f4;
+            --gcal-border: #dadce0;
+            --gcal-text: #1f1f1f;
+            --gcal-secondary-text: #5f6368;
+            --gcal-accent: #1a73e8;
+            --gcal-selected: #e8f0fe;
+          }
+          body {
+            margin: 0;
+            padding: 0;
+            font-family: 'Google Sans', Roboto, sans-serif;
+            background: var(--gcal-background);
+            color: var(--gcal-text);
+            overflow: hidden;
+            width: 100vw;
+            height: 100vh;
+          }
+          #mock-top-header {
+            height: 64px;
+            border-bottom: 1px solid var(--gcal-border);
+            display: flex;
+            align-items: center;
+            padding: 0 24px;
+            gap: 16px;
+            background: var(--gcal-surface);
+          }
+          #mock-main-content {
+            width: 100vw;
+            height: calc(100vh - 64px);
+            position: relative;
+          }
+        </style>
+      </head>
+      <body>
+        <div id="mock-top-header">
+          <div style="font-size: 20px; font-weight: 500; display: flex; align-items: center; gap: 8px;">
+            <span style="font-size: 24px;">📅</span>
+            <span id="cursa-brand-logo-trigger"><span class="cursa-brand-text-label">Calendar</span></span>
+          </div>
+          <div class="gb_v"></div>
+        </div>
+        <div id="mock-main-content"></div>
+      </body>
+    </html>
+  

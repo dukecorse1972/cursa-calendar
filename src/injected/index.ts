@@ -5,6 +5,7 @@ import { AppState } from './state';
 import { CreatorModal } from './ui/creatorModal';
 import { AcademicDetailModal } from './ui/detailModal';
 import { OnboardingModal } from './ui/onboardingModal';
+import { GradesModule } from './ui/grades/gradesModule';
 
 let isInitialized = false;
 
@@ -16,6 +17,7 @@ export function initCustomLayer(): void {
 
   if (isInitialized) {
     AcademicPanel.getInstance().mountInTopHeader();
+    GradesModule.getInstance().transformCalendarLogoTextIntoDropdown();
     return;
   }
 
@@ -35,6 +37,10 @@ export function initCustomLayer(): void {
       // 3. Mount Custom Academic Panel
       const panel = AcademicPanel.getInstance();
       panel.init();
+
+      // 4. Initialize Grades & Simulator Module
+      const gradesModule = GradesModule.getInstance();
+      gradesModule.init();
 
       isInitialized = true;
       console.log('[GoogleCalendarDesktop] Custom Academic Layer initialized successfully.');
@@ -59,6 +65,7 @@ export function destroyCustomLayer(): void {
   CreatorModal.getInstance().destroy();
   AcademicDetailModal.getInstance().destroy();
   OnboardingModal.getInstance().close();
+  GradesModule.getInstance().showCalendarView();
   AppState.getInstance().destroy();
   isInitialized = false;
 }

@@ -9,13 +9,13 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/dukecorse1972/cursa/releases/download/v1.0.4/Cursa-Setup-1.0.4.exe"><img src="https://img.shields.io/badge/Descargar-Instalador_.exe-2563eb?style=for-the-badge&logo=windows&logoColor=white" alt="Descargar Instalador Windows" /></a>
-  <a href="https://github.com/dukecorse1972/cursa/releases/download/v1.0.4/Cursa-v1.0.4-windows-x64.zip"><img src="https://img.shields.io/badge/Portable-.zip_(x64)-475569?style=for-the-badge&logo=zip&logoColor=white" alt="Descargar Portable" /></a>
-  <a href="RELEASE_NOTES_v1.0.4.md"><img src="https://img.shields.io/badge/Release-v1.0.4-059669?style=for-the-badge&logo=github&logoColor=white" alt="Notas de Versión" /></a>
+  <a href="https://github.com/dukecorse1972/cursa/releases/download/v1.1.0/Cursa-Setup-1.1.0.exe"><img src="https://img.shields.io/badge/Descargar-Instalador_.exe-2563eb?style=for-the-badge&logo=windows&logoColor=white" alt="Descargar Instalador Windows" /></a>
+  <a href="https://github.com/dukecorse1972/cursa/releases/download/v1.1.0/Cursa-v1.1.0-windows-x64.zip"><img src="https://img.shields.io/badge/Portable-.zip_(x64)-475569?style=for-the-badge&logo=zip&logoColor=white" alt="Descargar Portable" /></a>
+  <a href="RELEASE_NOTES_v1.1.0.md"><img src="https://img.shields.io/badge/Release-v1.1.0-059669?style=for-the-badge&logo=github&logoColor=white" alt="Notas de Versión" /></a>
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/Tests-84%2F84%20Passing-brightgreen?style=flat-square&logo=node.js&logoColor=white" alt="Tests" />
+  <img src="https://img.shields.io/badge/Tests-90%2F90%20Passing-brightgreen?style=flat-square&logo=node.js&logoColor=white" alt="Tests" />
   <img src="https://img.shields.io/badge/Electron-33.4.11-47848F?style=flat-square&logo=electron&logoColor=white" alt="Electron" />
   <img src="https://img.shields.io/badge/TypeScript-5.7.2-3178C6?style=flat-square&logo=typescript&logoColor=white" alt="TypeScript" />
   <img src="https://img.shields.io/badge/Licencia-MIT-yellow?style=flat-square" alt="Licencia" />
@@ -87,6 +87,13 @@ Selección en 1 clic entre 4 paletas estéticas curadas de papelería universita
 * **Control de Entregas Realizadas**: Marca tareas como `"✓ HECHA"` para atenuarlas en escala de grises y despejar la vista semanal.
 * **Bilingüe**: Extracción precisa de fechas tanto en español (`"15 de octubre"`) como en inglés (`"October 15"`).
 
+### 🧮 6. Simulador de Calificaciones con IA y Selector en Calendario
+* **Conmutador `Calendar` ⇄ `Calificaciones`**: Alterna instantáneamente en 0ms entre la rejilla de Google Calendar y el simulador de notas.
+* **Onboarding Conversacional con Google Gemini 2.5 Flash**: Explícale con tus palabras cómo te califica el profesor y la IA razona las ponderaciones (100%), exámenes y notas de corte con Structured Outputs en JSON.
+* **Simulador Inverso ("¿Qué necesito sacar?")**: Selecciona tu meta (`Aprobar 5.0`, `Notable 7.0`, `Sobresaliente 9.0`) para calcular la nota exacta requerida en el examen final.
+* **Avisos de Nota de Corte**: Alerta estricta si el profesor exige una nota mínima en el examen final para hacer media.
+* **Selector en Rejilla**: Vincula cualquier hito evaluable con su evento en Google Calendar clicando directamente sobre el chip.
+
 ---
 
 ## ⌨️ Atajos de Teclado
@@ -97,7 +104,7 @@ Selección en 1 clic entre 4 paletas estéticas curadas de papelería universita
 | <kbd>2</kbd> | Cambiar a pestaña **ENTREGAS Y EXÁMENES** |
 | <kbd>3</kbd> | Cambiar a pestaña **TODO** |
 | <kbd>Ctrl</kbd> + <kbd>,</kbd> | Abrir **🎓 Ajustes de Curso** (Asignaturas y Paletas) |
-| <kbd>Esc</kbd> | Cerrar cualquier ventana emergente abierta |
+| <kbd>Esc</kbd> | Cerrar cualquier ventana emergente abierta o volver al Calendario |
 | <kbd>t</kbd> | Ir a la fecha actual ("Hoy") |
 | <kbd>j</kbd> / <kbd>k</kbd> | Navegar a la semana anterior / siguiente |
 
@@ -106,12 +113,12 @@ Selección en 1 clic entre 4 paletas estéticas curadas de papelería universita
 ## 🚀 Instalación y Puesta en Marcha
 
 ### Opción 1: Instalador Oficial (.exe) — Recomendado
-1. Descarga [`Cursa-Setup-1.0.4.exe`](https://github.com/dukecorse1972/cursa/releases/download/v1.0.4/Cursa-Setup-1.0.4.exe).
+1. Descarga [`Cursa-Setup-1.1.0.exe`](https://github.com/dukecorse1972/cursa/releases/download/v1.1.0/Cursa-Setup-1.1.0.exe).
 2. Ejecuta el asistente. Se instala en `%LOCALAPPDATA%\Programs\Cursa` sin requerir permisos de administrador ni ventanas UAC.
 3. Crea accesos directos en el **Escritorio** y en el **Menú de Inicio** automáticamente.
 
 ### Opción 2: Versión Portable (.zip)
-1. Descarga [`Cursa-v1.0.4-windows-x64.zip`](https://github.com/dukecorse1972/cursa/releases/download/v1.0.4/Cursa-v1.0.4-windows-x64.zip).
+1. Descarga [`Cursa-v1.1.0-windows-x64.zip`](https://github.com/dukecorse1972/cursa/releases/download/v1.1.0/Cursa-v1.1.0-windows-x64.zip).
 2. Descomprime y ejecuta `Cursa.exe`. Ideal para llevar en USB sin tocar el sistema.
 
 ---

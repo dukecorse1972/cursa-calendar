@@ -14,7 +14,9 @@ describe('8. Resilient DOM Selectors & Strategy Dictionaries', () => {
     assert.ok(RESILIENT_SELECTORS.deleteButton.some((s) => s.includes('Eliminar')));
     assert.ok(RESILIENT_SELECTORS.deleteButton.some((s) => s.includes('Delete')));
     assert.ok(RESILIENT_SELECTORS.moreActionsButton.some((s) => s.includes('Más acciones')));
+    assert.ok(RESILIENT_SELECTORS.moreActionsButton.includes('button.xDYJ0e'));
     assert.ok(RESILIENT_SELECTORS.deleteMenuItem.some((s) => s.includes('Eliminar')));
+    assert.ok(RESILIENT_SELECTORS.deleteMenuItem.includes('[role="menuitem"][jsname="VkLyEc"]'));
   });
 
   test('RESILIENT_SELECTORS includes robust ARIA fallbacks for calendar rows and chips', () => {

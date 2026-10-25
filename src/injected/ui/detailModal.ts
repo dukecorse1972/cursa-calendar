@@ -261,9 +261,15 @@ export class AcademicDetailModal {
     const subjectColor = adapter.findSubjectColor(subject, colorMap);
 
     // 9. Event ID
-    const rawEventId = (typeof chip.getAttribute === 'function' ? chip.getAttribute('data-eventid') : '') ||
+    let rawEventId = (typeof chip.getAttribute === 'function' ? chip.getAttribute('data-eventid') : '') ||
       (typeof chip.querySelector === 'function' ? chip.querySelector('[data-eventid]')?.getAttribute('data-eventid') : '') ||
       (typeof chip.closest === 'function' ? chip.closest('[data-eventid]')?.getAttribute('data-eventid') : '') || '';
+
+    if (!rawEventId && typeof chip.getAttribute === 'function') {
+      const jslog = chip.getAttribute('jslog') || '';
+      const mLog = jslog.match(/2:\["([^"]+)"/);
+      if (mLog) rawEventId = mLog[1];
+    }
     const eventId = rawEventId.split(' ')[0] || rawEventId;
 
     // 10. Completed status
@@ -1200,11 +1206,20 @@ export class AcademicDetailModal {
         }
 
         const desktopApi = (typeof window !== 'undefined' ? (window as any).gcalDesktopAPI : null);
+        let res: any = null;
         if (desktopApi && typeof desktopApi.deleteAcademicEventBackground === 'function') {
-          const res = await desktopApi.deleteAcademicEventBackground(detail.eventId);
-          if (res && res.success === false) {
-            throw new Error(res.error || 'Error al eliminar el evento de Google Calendar');
-          }
+          try {
+            res = await desktopApi.deleteAcademicEventBackground(detail.eventId);
+          } catch (_) {}
+        }
+
+        if (!res || res.success === false) {
+          // Direct fast in-page iframe deletion fallback
+          res = await this.deleteViaOffscreenIframe(detail.eventId);
+        }
+
+        if (res && res.success === false) {
+          throw new Error(res.error || 'Error al eliminar el evento de Google Calendar');
         }
 
         // Clean local storage cache
@@ -1690,6 +1705,181 @@ export class AcademicDetailModal {
       setTimeout(() => {
         if (toast) toast.style.display = 'none';
       }, 2500);
+    }
+  }
+
+  private async deleteViaOffscreenIframe(eventId: string): Promise<{ success: boolean; error?: string }> {
+    if (typeof document === 'undefined') return { success: false, error: 'Document not available' };
+
+    let accountIndex = 0;
+    try {
+      const match = window.location.pathname.match(/\/calendar\/u\/(\d+)/);
+      if (match) accountIndex = parseInt(match[1], 10);
+    } catch (_) {}
+
+    const targetUrl = `https://calendar.google.com/calendar/u/${accountIndex}/r/eventedit/${encodeURIComponent(eventId)}`;
+    const iframe = document.createElement('iframe');
+    iframe.style.position = 'fixed';
+    iframe.style.top = '-9999px';
+    iframe.style.left = '-9999px';
+    iframe.style.width = '1200px';
+    iframe.style.height = '900px';
+    iframe.style.opacity = '0';
+    iframe.style.pointerEvents = 'none';
+    iframe.style.zIndex = '-1';
+    iframe.src = targetUrl;
+    document.body.appendChild(iframe);
+
+    function triggerRealisticClick(element: HTMLElement) {
+      if (!element) return;
+      const rect = element.getBoundingClientRect ? element.getBoundingClientRect() : { x: 0, y: 0, width: 0, height: 0 };
+      const clientX = rect.x + (rect.width ? rect.width / 2 : 10);
+      const clientY = rect.y + (rect.height ? rect.height / 2 : 10);
+      const opts = { bubbles: true, cancelable: true, view: iframe.contentWindow || window, clientX, clientY };
+
+      element.dispatchEvent(new PointerEvent('pointerover', opts));
+      element.dispatchEvent(new MouseEvent('mouseover', opts));
+      element.dispatchEvent(new PointerEvent('pointerdown', opts));
+      element.dispatchEvent(new MouseEvent('mousedown', opts));
+      if (typeof element.focus === 'function') element.focus();
+      element.dispatchEvent(new PointerEvent('pointerup', opts));
+      element.dispatchEvent(new MouseEvent('mouseup', opts));
+      element.dispatchEvent(new MouseEvent('click', opts));
+      if (typeof element.click === 'function') {
+        element.click();
+      }
+    }
+
+    try {
+      const startTime = Date.now();
+      let doc: Document | null = null;
+      let directBtn: HTMLElement | null = null;
+      let moreActionsBtn: HTMLElement | null = null;
+
+      while (Date.now() - startTime < 15000) {
+        try {
+          doc = iframe.contentDocument;
+        } catch (_) {}
+
+        if (doc) {
+          // 1. Direct delete button (only explicit event delete, never format or notification)
+          const directCandidate = (doc.querySelector('#xDelBu') ||
+            doc.querySelector('button[aria-label="Eliminar" i], button[aria-label="Delete" i], button[aria-label*="Eliminar evento" i], button[aria-label*="Delete event" i]')) as HTMLElement;
+          if (directCandidate) {
+            const aria = (directCandidate.getAttribute('aria-label') || '').toLowerCase();
+            if (!aria.includes('formato') && !aria.includes('notificac') && !aria.includes('recordator')) {
+              directBtn = directCandidate;
+              break;
+            }
+          }
+
+          // 2. More actions dropdown button trigger
+          const bgYcDf = doc.querySelector('.BgYcDf');
+          if (bgYcDf) {
+            moreActionsBtn = (bgYcDf.querySelector('button, [role="button"]') || bgYcDf) as HTMLElement;
+            if (moreActionsBtn) break;
+          }
+
+          const xDYJ0e = doc.querySelector<HTMLElement>('button.xDYJ0e');
+          if (xDYJ0e) {
+            moreActionsBtn = xDYJ0e;
+            break;
+          }
+
+          const saveBtn = doc.querySelector('#xSaveBu');
+          if (saveBtn && saveBtn.parentElement) {
+            moreActionsBtn = Array.from(saveBtn.parentElement.querySelectorAll<HTMLElement>('button, [role="button"]')).find(b =>
+              b !== saveBtn && b.id !== 'xCancelBu'
+            ) || null;
+            if (moreActionsBtn) break;
+          }
+
+          const allButtons = Array.from(doc.querySelectorAll<HTMLElement>('button, [role="button"]'));
+          moreActionsBtn = allButtons.find(b => {
+            const txt = (b.textContent || '').trim().toLowerCase();
+            const aria = (b.getAttribute('aria-label') || '').toLowerCase();
+            return (
+              txt.includes('más acciones') || txt.includes('mas acciones') || txt.includes('more actions') ||
+              txt.includes('més accions') || txt.includes('máis accións') ||
+              aria.includes('más acciones') || aria.includes('mas acciones') || aria.includes('more actions')
+            );
+          }) || null;
+          if (moreActionsBtn) break;
+        }
+        await new Promise(r => setTimeout(r, 200));
+      }
+
+      if (directBtn) {
+        triggerRealisticClick(directBtn);
+      } else if (moreActionsBtn && doc) {
+        triggerRealisticClick(moreActionsBtn);
+        await new Promise(r => setTimeout(r, 500));
+
+        const menuItems = Array.from(doc.querySelectorAll<HTMLElement>('[role="menuitem"], .goog-menuitem, .JAPqpe, li[jsname="VkLyEc"], [role="menu"] li, li'));
+        const delItem = menuItems.find(m => {
+          const txt = (m.textContent || '').trim().toLowerCase();
+          const aria = (m.getAttribute('aria-label') || '').toLowerCase();
+          const jsname = m.getAttribute('jsname') || '';
+          if (jsname === 'VkLyEc') return true;
+          if (txt.includes('formato') || aria.includes('formato')) return false;
+          return (
+            txt === 'eliminar' || txt === 'delete' || txt.startsWith('eliminar') || txt.startsWith('delete') ||
+            txt === 'supprimer' || txt === 'löschen' || txt === 'suprimeix' || txt === 'borrar' || txt === 'excluir' ||
+            aria === 'eliminar' || aria === 'delete' || aria === 'supprimer' || aria === 'löschen' || aria === 'suprimeix' || aria === 'borrar'
+          );
+        });
+
+        if (!delItem) {
+          throw new Error('Opción Eliminar no encontrada tras abrir el menú de acciones');
+        }
+
+        triggerRealisticClick(delItem);
+      } else {
+        throw new Error('No se encontró el menú de acciones para eliminar el evento');
+      }
+
+      // Check if confirmation modal dialog appeared (e.g. recurring event or prompt)
+      await new Promise(r => setTimeout(r, 800));
+      if (doc) {
+        const dialog = doc.querySelector<HTMLElement>('[role="dialog"]');
+        if (dialog) {
+          const confirmBtn = Array.from(dialog.querySelectorAll<HTMLElement>('button, [role="button"]')).find(b => {
+            const txt = (b.textContent || '').trim().toLowerCase();
+            const aria = (b.getAttribute('aria-label') || '').toLowerCase();
+            return (
+              txt.includes('eliminar') || txt.includes('delete') || txt.includes('aceptar') || txt.includes('ok') || txt.includes('confirm') || txt.includes('sí') ||
+              aria.includes('eliminar') || aria.includes('delete') || aria.includes('aceptar') || aria.includes('ok') || aria.includes('confirm') || aria.includes('sí')
+            );
+          });
+          if (confirmBtn) triggerRealisticClick(confirmBtn);
+        }
+      }
+
+      // Wait up to 6s for navigation away from /r/eventedit/
+      let navigatedAway = false;
+      const waitStart = Date.now();
+      while (Date.now() - waitStart < 6000) {
+        try {
+          const href = iframe.contentWindow?.location?.href || '';
+          if (href && !href.includes('/r/eventedit/')) {
+            navigatedAway = true;
+            break;
+          }
+        } catch (_) {
+          navigatedAway = true;
+          break;
+        }
+        await new Promise(r => setTimeout(r, 200));
+      }
+
+      iframe.remove();
+      return {
+        success: navigatedAway,
+        error: navigatedAway ? undefined : 'No se confirmó la eliminación en el servidor de Google Calendar'
+      };
+    } catch (err: any) {
+      if (iframe && iframe.parentNode) iframe.remove();
+      return { success: false, error: err?.message || 'Error desconocido' };
     }
   }
 

@@ -100,6 +100,6 @@ export function assertValidAcademicPayload(payload: unknown): asserts payload is
 export function isValidEventId(eventId: unknown): eventId is string {
   if (typeof eventId !== 'string') return false;
   const trimmed = eventId.trim();
-  // Google Calendar event IDs are alphanumeric / base64 encoded strings
-  return trimmed.length >= 4 && trimmed.length <= 256 && /^[a-zA-Z0-9_=-]+$/.test(trimmed);
+  // Google Calendar event IDs are alphanumeric / base64 encoded strings (which may contain +, /, =, _, -, or single space for compound IDs)
+  return trimmed.length >= 4 && trimmed.length <= 512 && /^[a-zA-Z0-9_=+\/-]+( [a-zA-Z0-9_=+\/-]+)?$/.test(trimmed);
 }

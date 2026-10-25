@@ -2,6 +2,8 @@ import { contextBridge, ipcRenderer } from 'electron';
 import { initCustomLayer } from '../injected/index';
 import { AppState } from '../injected/state';
 import { OnboardingModal } from '../injected/ui/onboardingModal';
+import { GradesSimulatorView } from '../injected/ui/grades/gradesSimulatorView';
+import { GradesModule } from '../injected/ui/grades/gradesModule';
 
 const desktopApi = {
   createAcademicEventBackground: (payload: any) =>
@@ -13,14 +15,27 @@ const desktopApi = {
   updateEventDescriptionBackground: (data: { eventId?: string; eventTitle?: string; description: string }) =>
     ipcRenderer.invoke('update-event-description-background', data),
   ensureAcademicCalendarsBackground: (calendarNames?: string[]) =>
-    ipcRenderer.invoke('ensure-academic-calendars-background', calendarNames)
+    ipcRenderer.invoke('ensure-academic-calendars-background', calendarNames),
+  takeScreenshot: (filePath: string) =>
+    ipcRenderer.invoke('take-debug-screenshot', filePath)
 };
 
 try {
   contextBridge.exposeInMainWorld('gcalDesktopAPI', desktopApi);
+  contextBridge.exposeInMainWorld('cursaMountSimulator', (parent: HTMLElement, subject?: string) => {
+    const view = GradesSimulatorView.getInstance();
+    if (subject) view.setActiveSubject(subject);
+    view.mount(parent);
+  });
 } catch (_) {}
 
 (window as any).gcalDesktopAPI = desktopApi;
+(window as any).cursaMountSimulator = (parent: HTMLElement, subject?: string) => {
+  const view = GradesSimulatorView.getInstance();
+  if (subject) view.setActiveSubject(subject);
+  view.mount(parent);
+};
+(window as any).cursaGradesModule = GradesModule.getInstance();
 
 function runIfCalendar(): void {
   try {

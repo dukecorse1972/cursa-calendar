@@ -25,16 +25,16 @@ export const RESILIENT_SELECTORS = {
     'button[data-action="delete"]',
     'button[aria-label*="Eliminar evento" i]',
     'button[aria-label*="Delete event" i]',
-    'button[aria-label*="Eliminar" i]',
-    'button[aria-label*="Delete" i]',
-    'button[aria-label*="Suprimeix" i]',
-    'button[aria-label*="Supprimer" i]',
-    'button[aria-label*="Löschen" i]',
+    'button[aria-label="Eliminar" i]',
+    'button[aria-label="Delete" i]',
+    'button[aria-label="Suprimeix" i]',
+    'button[aria-label="Supprimer" i]',
+    'button[aria-label="Löschen" i]',
     '[role="button"][aria-label*="Eliminar evento" i]',
     '[role="button"][aria-label*="Delete event" i]',
-    '[role="button"][aria-label*="Eliminar" i]',
-    '[role="button"][aria-label*="Delete" i]',
-    '[role="button"][aria-label*="Suprimeix" i]'
+    '[role="button"][aria-label="Eliminar" i]',
+    '[role="button"][aria-label="Delete" i]',
+    '[role="button"][aria-label="Suprimeix" i]'
   ],
 
   // Description input/textarea in event edit page
@@ -74,16 +74,29 @@ export const RESILIENT_SELECTORS = {
 
   // More actions button trigger in event edit page
   moreActionsButton: [
+    '.BgYcDf button',
+    '.BgYcDf [role="button"]',
+    'button.xDYJ0e',
+    'button[aria-haspopup="menu"]',
     'button[aria-label*="Más acciones" i]',
     'button[aria-label*="Mas acciones" i]',
     'button[aria-label*="More actions" i]',
+    'button[aria-label*="Més accions" i]',
+    'button[aria-label*="Máis accións" i]',
+    'button[aria-label*="Plus d\'actions" i]',
+    'button[aria-label*="Weitere Aktionen" i]',
     '[role="button"][aria-label*="Más acciones" i]',
     '[role="button"][aria-label*="Mas acciones" i]',
-    '[role="button"][aria-label*="More actions" i]'
+    '[role="button"][aria-label*="More actions" i]',
+    '[role="button"].xDYJ0e'
   ],
 
   // Delete option inside More actions dropdown menu
   deleteMenuItem: [
+    '.BgYcDf [role="menuitem"]',
+    '.BgYcDf li',
+    '[role="menuitem"][jsname="VkLyEc"]',
+    'li[jsname="VkLyEc"]',
     '[role="menuitem"][aria-label*="Eliminar" i]',
     '[role="menuitem"][aria-label*="Delete" i]',
     '.goog-menuitem[aria-label*="Eliminar" i]',
