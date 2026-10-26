@@ -38,6 +38,8 @@ describe('25. Background Automation Script Builders & IPC Runtime Guards', () =>
     assert.equal(resolveSafeDebugScreenshotPath(insideWorkspace), path.resolve(insideWorkspace));
 
     assert.equal(resolveSafeDebugScreenshotPath('C:\\Windows\\System32\\evil.png'), null);
+    assert.equal(resolveSafeDebugScreenshotPath('/etc/shadow.png'), null);
+    assert.equal(resolveSafeDebugScreenshotPath(path.resolve(process.cwd(), '..', 'evil.png')), null);
     assert.equal(resolveSafeDebugScreenshotPath(path.join(process.cwd(), 'package.json')), null);
     assert.equal(resolveSafeDebugScreenshotPath(path.join(process.cwd(), 'artifacts', 'bad\0.png')), null);
     assert.equal(resolveSafeDebugScreenshotPath(''), null);

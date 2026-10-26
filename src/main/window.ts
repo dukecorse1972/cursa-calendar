@@ -50,6 +50,10 @@ export function resolveSafeDebugScreenshotPath(filePath: unknown): string | null
   if (typeof filePath !== 'string' || !filePath.trim() || filePath.includes('\0')) {
     return null;
   }
+  // Reject Windows-style drive letters or backslashes on POSIX systems
+  if (process.platform !== 'win32' && (filePath.includes('\\') || /^[a-zA-Z]:/.test(filePath))) {
+    return null;
+  }
   const resolved = path.resolve(filePath.trim());
   if (path.extname(resolved).toLowerCase() !== '.png') {
     return null;
@@ -60,8 +64,8 @@ export function resolveSafeDebugScreenshotPath(filePath: unknown): string | null
   } catch (_) {}
 
   const isInsideAllowedRoot = allowedRoots.some((root) => {
-    const normalizedRoot = root.toLowerCase();
-    const normalizedTarget = resolved.toLowerCase();
+    const normalizedRoot = process.platform === 'win32' ? root.toLowerCase() : root;
+    const normalizedTarget = process.platform === 'win32' ? resolved.toLowerCase() : resolved;
     return normalizedTarget.startsWith(normalizedRoot + path.sep);
   });
 
