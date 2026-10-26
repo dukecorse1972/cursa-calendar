@@ -13,6 +13,7 @@ release/
 *.log
 
 # Temporary and debug artifacts
+artifacts/
 scripts/_temp_*
 tools/debug-scripts/_temp_*
 *.tmp

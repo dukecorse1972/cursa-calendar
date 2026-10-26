@@ -1,5 +1,5 @@
 import { AppTab } from '../../shared/types';
-import { AppState, AppStateData } from '../state';
+import { AppState } from '../state';
 import { GoogleCalendarAdapter } from '../adapter/GoogleCalendarAdapter';
 import { CreatorModal } from './creatorModal';
 import { AcademicDetailModal } from './detailModal';
@@ -7,6 +7,42 @@ import { OnboardingModal } from './onboardingModal';
 import { safeSetInnerHTML } from '../utils/dom';
 import { getIsolatedItem } from '../utils/storage';
 import { t } from '../../shared/i18n';
+
+/**
+ * Pure helper determining whether global academic keyboard shortcuts (1, 2, 3, j, k, Ctrl+,)
+ * must be suppressed because focus is inside an editable input or an academic modal is open.
+ */
+export function shouldSuppressAcademicShortcut(
+  activeEl: { tagName?: string; getAttribute?: (attr: string) => string | null; closest?: (sel: string) => Element | null } | null,
+  doc?: { querySelector?: (sel: string) => Element | null } | null
+): boolean {
+  const tag = (activeEl?.tagName || '').toUpperCase();
+  const isEditableTag = tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT';
+  const isRoleTextbox = activeEl?.getAttribute?.('role') === 'textbox';
+  const isContentEditable = activeEl?.getAttribute?.('contenteditable') === 'true';
+  const isInsideModal = Boolean(
+    activeEl?.closest?.('#gcal-academic-creator-modal') ||
+    activeEl?.closest?.('#gcal-academic-detail-modal') ||
+    activeEl?.closest?.('#gcal-onboarding-modal-overlay') ||
+    activeEl?.closest?.('#cursa-grades-chat-modal-overlay')
+  );
+
+  if (isEditableTag || isRoleTextbox || isContentEditable || isInsideModal) {
+    return true;
+  }
+
+  if (doc && typeof doc.querySelector === 'function') {
+    const creatorEl = doc.querySelector('#gcal-academic-creator-modal');
+    const isCreatorOpen = Boolean(creatorEl && creatorEl.getAttribute('style')?.includes('display: flex'));
+    const isDetailOpen = Boolean(doc.querySelector('#gcal-academic-detail-modal'));
+    const isOnboardingOpen = Boolean(doc.querySelector('#gcal-onboarding-modal-overlay'));
+    if (isCreatorOpen || isDetailOpen || isOnboardingOpen) {
+      return true;
+    }
+  }
+
+  return false;
+}
 
 export class AcademicPanel {
   private static instance: AcademicPanel | null = null;
@@ -393,6 +429,14 @@ export class AcademicPanel {
     eventTypes.forEach((type) => {
       window.addEventListener(type, handleChipClick as any, true);
     });
+
+    const prevRemover = this.removeEventListeners;
+    this.removeEventListeners = () => {
+      if (prevRemover) prevRemover();
+      eventTypes.forEach((type) => {
+        window.removeEventListener(type, handleChipClick as any, true);
+      });
+    };
   }
 
   /**
@@ -403,25 +447,10 @@ export class AcademicPanel {
    */
   private setupKeyboardNavigation(): void {
     const handleKeyNavigation = (e: KeyboardEvent) => {
-      const activeEl = document.activeElement;
-      const isInput =
-        activeEl &&
-        (activeEl.tagName === 'INPUT' ||
-          activeEl.tagName === 'TEXTAREA' ||
-          activeEl.tagName === 'SELECT' ||
-          activeEl.getAttribute('role') === 'textbox' ||
-          activeEl.getAttribute('contenteditable') === 'true' ||
-          Boolean(activeEl.closest('#gcal-academic-creator-modal')) ||
-          Boolean(activeEl.closest('#gcal-academic-detail-modal')) ||
-          Boolean(activeEl.closest('#gcal-onboarding-modal-overlay')));
-
-      // Check if any academic modal is currently active on screen
-      const creatorEl = document.querySelector('#gcal-academic-creator-modal');
-      const isCreatorOpen = Boolean(creatorEl && creatorEl.getAttribute('style')?.includes('display: flex'));
-      const isDetailOpen = Boolean(document.querySelector('#gcal-academic-detail-modal'));
-      const isOnboardingOpen = Boolean(document.querySelector('#gcal-onboarding-modal-overlay'));
-
-      if (isInput || isCreatorOpen || isDetailOpen || isOnboardingOpen) return;
+      const activeEl = typeof document !== 'undefined' ? document.activeElement : null;
+      if (shouldSuppressAcademicShortcut(activeEl, typeof document !== 'undefined' ? document : null)) {
+        return;
+      }
 
       // Universal shortcut Ctrl+, (or Cmd+,) to open settings in edit mode
       if ((e.ctrlKey || e.metaKey) && e.key === ',') {

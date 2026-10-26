@@ -13,9 +13,12 @@ app.whenReady().then(async () => {
   await win.loadFile(htmlPath);
   await new Promise(r => setTimeout(r, 600));
 
+  const outDir = path.resolve(__dirname, '..', '..', 'artifacts', 'debug-screenshots');
+  fs.mkdirSync(outDir, { recursive: true });
+  const outPath = path.join(outDir, 'OPCIONES_VISTA_SEMANAL.png');
   const image = await win.webContents.capturePage();
-  fs.writeFileSync('C:/Users/dario/Downloads/OPCIONES_VISTA_SEMANAL.png', image.toPNG());
-  console.log('Saved C:/Users/dario/Downloads/OPCIONES_VISTA_SEMANAL.png');
+  fs.writeFileSync(outPath, image.toPNG());
+  console.log('Saved', outPath);
 
   app.quit();
 });

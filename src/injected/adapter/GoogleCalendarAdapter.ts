@@ -2,16 +2,7 @@ import { AcademicEventPayload, AppTab, EventType } from '../../shared/types';
 import { formatAcademicEventUrl } from '../../shared/formatters';
 import { safeSetInnerHTML, escapeHtml } from '../utils/dom';
 import { getIsolatedItem, setIsolatedItem, removeIsolatedItem } from '../utils/storage';
-import { logger } from '../../shared/logger';
-import { RESILIENT_SELECTORS, queryResilient } from './selectors';
 import { AppState } from '../state';
-
-export interface NativeCalendarInfo {
-  name: string;
-  element: HTMLElement;
-  checkbox: HTMLElement | HTMLInputElement;
-  isVisible: boolean;
-}
 
 export class GoogleCalendarAdapter {
   private static instance: GoogleCalendarAdapter | null = null;
@@ -21,6 +12,8 @@ export class GoogleCalendarAdapter {
   private isSyncing: boolean = false;
   private initialSyncDone: boolean = false;
   private chipPollInterval: any = null;
+  private deletedEventIds: Set<string> = new Set();
+  private selectionListener: (() => void) | null = null;
 
   public static getInstance(): GoogleCalendarAdapter {
     if (!GoogleCalendarAdapter.instance) {
@@ -54,16 +47,70 @@ export class GoogleCalendarAdapter {
       }
     } catch (_) {}
 
+    try {
+      const storedDeleted = getIsolatedItem('gcal_deleted_events');
+      if (storedDeleted) {
+        const parsed = JSON.parse(storedDeleted);
+        if (Array.isArray(parsed)) {
+          this.deletedEventIds = new Set(parsed);
+          this.applyDeletedEventsCss();
+        }
+      }
+    } catch (_) {}
+
+    this.currentActiveTab = AppState.getInstance().getState().activeTab;
     this.injectCleanLayoutStyles();
+    this.setupSelectionGuard();
     this.tagCalendarRows();
     this.setupObserver();
     this.applyTabFilter(this.currentActiveTab, true);
     this.enhanceAcademicChips();
+    this.consumePendingToast();
     if (!this.chipPollInterval && typeof window !== 'undefined') {
       this.chipPollInterval = setInterval(() => {
         this.enhanceAcademicChips();
       }, 3000);
     }
+  }
+
+  private consumePendingToast(): void {
+    try {
+      if (typeof sessionStorage === 'undefined' || typeof document === 'undefined') return;
+      const msg = sessionStorage.getItem('gcal_pending_toast');
+      if (!msg) return;
+      sessionStorage.removeItem('gcal_pending_toast');
+
+      setTimeout(() => {
+        const existing = document.querySelector('#gcal-toast-msg');
+        if (existing) existing.remove();
+        const toast = document.createElement('div');
+        toast.id = 'gcal-toast-msg';
+        toast.style.cssText = `
+          position: fixed;
+          bottom: 28px;
+          left: 50%;
+          transform: translateX(-50%);
+          background: #1e293b;
+          color: #ffffff;
+          padding: 12px 24px;
+          border-radius: 28px;
+          font-size: 13.5px;
+          font-weight: 600;
+          box-shadow: 0 8px 24px rgba(0, 0, 0, 0.3);
+          z-index: 9999999;
+          opacity: 1;
+          transition: opacity 0.3s ease;
+          pointer-events: none;
+          font-family: 'Google Sans', Roboto, sans-serif;
+        `;
+        toast.textContent = msg;
+        document.body.appendChild(toast);
+        setTimeout(() => {
+          toast.style.opacity = '0';
+          setTimeout(() => toast.remove(), 300);
+        }, 3200);
+      }, 450);
+    } catch (_) {}
   }
 
   /**
@@ -250,13 +297,139 @@ export class GoogleCalendarAdapter {
           transition: opacity 0.25s cubic-bezier(0.4, 0, 0.2, 1), filter 0.25s ease !important;
         }
 
+        /* 12. Eventos académicos de otros cuatrimestres / periodos inactivos */
+        [data-eventchip][data-gcal-inactive-term="true"] {
+          display: none !important;
+          visibility: hidden !important;
+          pointer-events: none !important;
+        }
+
         [data-eventchip].gcal-chip-dimmed:hover,
         .custom-academic-container.gcal-chip-dimmed:hover {
           opacity: 0.82 !important;
           filter: grayscale(0.05) !important;
           box-shadow: 0 4px 14px rgba(0, 0, 0, 0.35) !important;
         }
+
+        /* 13. Prevent accidental blue text/column selection & focus outline on calendar grid */
+        [role="main"],
+        [role="main"] *:not(input):not(textarea):not([contenteditable="true"]):not([role="textbox"]):not([role="dialog"] *),
+        [role="grid"],
+        [role="columnheader"],
+        [role="gridcell"],
+        [role="row"],
+        .T5D48c,
+        .SGWAac,
+        .Yvjgnd,
+        .mVkCId,
+        [data-eventchip] {
+          -webkit-user-select: none !important;
+          user-select: none !important;
+        }
+
+        /* Suppress native browser blue text selection highlight across calendar grid */
+        [role="main"] ::selection {
+          background: transparent !important;
+        }
+
+        /* Remove blue focus outlines from calendar columns, cells, and grid headers */
+        [role="gridcell"]:focus,
+        [role="gridcell"]:focus-visible,
+        [role="columnheader"]:focus,
+        [role="columnheader"]:focus-visible,
+        [role="grid"]:focus,
+        [role="grid"]:focus-visible,
+        .Yvjgnd:focus,
+        .mVkCId:focus {
+          outline: none !important;
+          box-shadow: none !important;
+        }
+
+        /* Ensure all text inputs, textareas, and modal fields remain selectable and editable */
+        input,
+        textarea,
+        [contenteditable="true"],
+        [role="textbox"],
+        [role="dialog"],
+        [role="dialog"] * {
+          -webkit-user-select: text !important;
+          user-select: text !important;
+        }
+
+        input::selection,
+        textarea::selection,
+        [contenteditable="true"]::selection,
+        [role="textbox"]::selection,
+        [role="dialog"] ::selection {
+          background: #b3d7ff !important;
+          color: inherit !important;
+        }
       `;
+  }
+
+  private normalizeSubjectText(text: string): string {
+    return (text || '')
+      .normalize('NFD')
+      .replace(/[\u0300-\u036f]/g, '')
+      .replace(/[^\p{L}\p{N}\s@.]/gu, ' ')
+      .replace(/\s+/g, ' ')
+      .trim()
+      .toLowerCase();
+  }
+
+  public getConfiguredSubjects(): string[] {
+    try {
+      const stored = getIsolatedItem('gcal_academic_subjects');
+      if (stored) {
+        const parsed = JSON.parse(stored);
+        if (Array.isArray(parsed) && parsed.length > 0) {
+          const names = parsed
+            .map((p: any) => (typeof p === 'string' ? p.trim() : (p?.name || '').trim()))
+            .filter(Boolean);
+          if (names.length > 0) {
+            return Array.from(new Set(names));
+          }
+        }
+      }
+    } catch (_) {}
+    return [];
+  }
+
+  public getActiveProfileIdentifiers(): string[] {
+    if (typeof document === 'undefined' || typeof document.querySelector !== 'function') {
+      return [];
+    }
+    const identifiers = new Set<string>();
+    try {
+      const accountEl = document.querySelector<HTMLElement>(
+        'header a[href*="SignOutOptions"], [data-email], a[aria-label*="@"], div[aria-label*="@"]'
+      );
+      if (accountEl) {
+        const emailAttr = (accountEl.getAttribute('data-email') || '').trim().toLowerCase();
+        if (emailAttr && emailAttr.includes('@')) {
+          identifiers.add(emailAttr);
+          identifiers.add(emailAttr.split('@')[0]);
+        }
+
+        const ariaLabel = accountEl.getAttribute('aria-label') || '';
+        const emailMatch = ariaLabel.match(/([a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,})/);
+        if (emailMatch) {
+          const email = emailMatch[1].toLowerCase();
+          identifiers.add(email);
+          identifiers.add(email.split('@')[0]);
+        }
+
+        // Extract display name from "Cuenta de Google: Nombre Apellido (email@...)" or "Google Account: Name (email@...)"
+        const nameMatch = ariaLabel.match(/(?:Cuenta de Google|Google Account|Compte Google|Google-Konto)\s*:\s*([^(,\n]+?)(?:\s*\(|$)/i);
+        if (nameMatch && nameMatch[1]) {
+          const normName = this.normalizeSubjectText(nameMatch[1]);
+          if (normName.length >= 2) {
+            identifiers.add(normName);
+          }
+        }
+      }
+    } catch (_) {}
+    return Array.from(identifiers);
   }
 
   public isAcademic(name: string): boolean {
@@ -264,7 +437,19 @@ export class GoogleCalendarAdapter {
   }
 
   public isPersonal(name: string): boolean {
-    return /personal|mi calendario|my calendar|default calendar/i.test(name.trim());
+    const trimmed = (name || '').trim();
+    if (!trimmed) return false;
+    if (/personal|mi calendario|my calendar|default calendar/i.test(trimmed)) {
+      return true;
+    }
+    // Primary calendars named directly with an email address
+    if (/^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$/.test(trimmed)) {
+      return true;
+    }
+    const norm = this.normalizeSubjectText(trimmed);
+    if (!norm) return false;
+    const profileIds = this.getActiveProfileIdentifiers();
+    return profileIds.some((id) => norm === id || trimmed.toLowerCase() === id);
   }
 
   public isOther(name: string): boolean {
@@ -275,51 +460,115 @@ export class GoogleCalendarAdapter {
     return /cumpleaño|birthday|anniversaire|geburtstag|aniversari/i.test(name);
   }
 
+  private matchesConfiguredSubject(name: string, configured: string[]): boolean {
+    if (configured.length === 0) return false;
+    const normCandidate = this.normalizeSubjectText(name);
+    if (!normCandidate) return false;
+
+    return configured.some((subj) => {
+      const normSubj = this.normalizeSubjectText(subj);
+      if (!normSubj) return false;
+      return (
+        normCandidate === normSubj ||
+        normCandidate.startsWith(normSubj + ' ') ||
+        normCandidate.endsWith(' ' + normSubj)
+      );
+    });
+  }
+
+  private hasExplicitTermSubjects(): boolean {
+    try {
+      return getIsolatedItem('gcal_academic_subjects') !== null;
+    } catch {
+      return false;
+    }
+  }
+
+  private isArchivedInOtherTerm(name: string, activeConfigured: string[]): boolean {
+    if (this.matchesConfiguredSubject(name, activeConfigured)) return false;
+    try {
+      const rawArchive = getIsolatedItem('gcal_terms_archive');
+      if (!rawArchive) return false;
+      const archive = JSON.parse(rawArchive);
+      if (!archive || typeof archive !== 'object') return false;
+      for (const snap of Object.values(archive) as any[]) {
+        if (snap && Array.isArray(snap.subjects)) {
+          const archivedNames = snap.subjects
+            .map((s: any) => (typeof s === 'string' ? s : s?.name || ''))
+            .filter(Boolean);
+          if (this.matchesConfiguredSubject(name, archivedNames)) {
+            return true;
+          }
+        }
+      }
+    } catch (_) {}
+    return false;
+  }
+
   public isClass(name: string): boolean {
-    if (this.isAcademic(name) || this.isOther(name) || this.isBirthday(name) || this.isPersonal(name)) {
+    if (!name || !name.trim()) return false;
+    if (this.isAcademic(name) || this.isBirthday(name)) {
+      return false;
+    }
+    const configured = this.getConfiguredSubjects();
+    if (this.matchesConfiguredSubject(name, configured)) {
+      return true;
+    }
+    if (this.hasExplicitTermSubjects()) {
+      // If active term is explicitly empty or this subject belongs to another archived term, hide it
+      if (configured.length === 0 || this.isArchivedInOtherTerm(name, configured)) {
+        return false;
+      }
+    }
+    if (this.isOther(name) || this.isPersonal(name)) {
       return false;
     }
     return true;
   }
 
   /**
-   * Returns detected subjects / classes from Google Calendar rows or configured storage.
+   * Returns detected subjects / classes for the active period.
+   * When the user has configured subjects for the active period (including [] for a new empty period),
+   * strictly returns those subjects so previous periods' subjects disappear cleanly.
    */
   public getDetectedClasses(): string[] {
-    // 1. Scan active DOM checkboxes first if available (gives the user's real calendars)
-    if (typeof document !== 'undefined') {
+    const configured = this.getConfiguredSubjects();
+    if (this.hasExplicitTermSubjects()) {
+      return configured;
+    }
+
+    let domClasses: string[] = [];
+
+    // Scan active DOM checkboxes if available (only before onboarding/plan is configured)
+    if (typeof document !== 'undefined' && typeof document.querySelectorAll === 'function') {
       const checkboxes = Array.from(
         document.querySelectorAll<HTMLInputElement>('input[type="checkbox"], [role="checkbox"]')
       );
-      const domClasses = checkboxes
+      domClasses = checkboxes
         .map((cb) => {
           const row = cb.closest<HTMLElement>('.XXcuqd') || cb.closest<HTMLElement>('li, .DYTqTd, [role="listitem"]');
           const rawName = cb.getAttribute('aria-label') || row?.textContent?.trim() || '';
-          // Preserve emoji in calendar name, clean trailing options menu text
           return rawName
             .replace(/\bmore_vert.*$/i, '')
             .trim();
         })
         .filter((name) => Boolean(name) && this.isClass(name));
-
-      if (domClasses.length > 0) {
-        return Array.from(new Set(domClasses));
-      }
     }
 
-    // 2. Fallback to configured subjects in isolated storage
-    try {
-      const stored = getIsolatedItem('gcal_academic_subjects');
-      if (stored) {
-        const parsed = JSON.parse(stored);
-        if (Array.isArray(parsed) && parsed.length > 0) {
-          const names = parsed
-            .map((p: any) => (typeof p === 'string' ? p : p.name))
-            .filter(Boolean);
-          if (names.length > 0) return Array.from(new Set(names));
+    if (domClasses.length > 0) {
+      const merged: string[] = [];
+      const seenNormalized = new Set<string>();
+      for (const item of domClasses) {
+        const key = this.normalizeSubjectText(item) || item.toLowerCase().trim();
+        if (!seenNormalized.has(key)) {
+          seenNormalized.add(key);
+          merged.push(item);
         }
       }
-    } catch (_) {}
+      if (merged.length > 0) {
+        return merged;
+      }
+    }
 
     return [
       'Matemáticas',
@@ -333,6 +582,7 @@ export class GoogleCalendarAdapter {
    * Tags native Google Calendar rows with data-gcal-type attribute for instant pure CSS filtering.
    */
   public tagCalendarRows(): void {
+    if (typeof document === 'undefined' || typeof document.querySelectorAll !== 'function') return;
     const checkboxes = Array.from(
       document.querySelectorAll<HTMLInputElement>('input[type="checkbox"], [role="checkbox"]')
     );
@@ -414,7 +664,10 @@ export class GoogleCalendarAdapter {
           if (tab === 'CLASES') {
             shouldCheck = this.isClass(rawName);
           } else if (tab === 'ENTREGAS_EXAMENES') {
-            shouldCheck = hasAcademicCalendars ? this.isAcademic(rawName) : true;
+            const allowPrimaryFallback = getIsolatedItem('gcal_allow_primary_in_academic') === 'true';
+            shouldCheck = hasAcademicCalendars
+              ? this.isAcademic(rawName) || (allowPrimaryFallback && this.isPersonal(rawName))
+              : true;
           } else {
             shouldCheck = true;
           }
@@ -443,6 +696,28 @@ export class GoogleCalendarAdapter {
     if (desktopApi && typeof desktopApi.createAcademicEventBackground === 'function') {
       const res = await desktopApi.createAcademicEventBackground(payload);
       if (res && res.success) {
+        try {
+          setIsolatedItem('gcal_allow_primary_in_academic', res.usedPrimaryFallback ? 'true' : 'false');
+        } catch (_) {}
+
+        // Clear any previous deletion filter matching this title
+        if (payload.title) {
+          const cleanTitle = payload.title.trim().toLowerCase();
+          let removed = false;
+          this.deletedEventIds.forEach((id) => {
+            if (id.toLowerCase().includes(cleanTitle)) {
+              this.deletedEventIds.delete(id);
+              removed = true;
+            }
+          });
+          if (removed) {
+            try {
+              setIsolatedItem('gcal_deleted_events', JSON.stringify(Array.from(this.deletedEventIds)));
+            } catch (_) {}
+            this.applyDeletedEventsCss();
+          }
+        }
+
         // Guarantee user stays on ENTREGAS_EXAMENES with correct calendars filtered
         this.applyTabFilter('ENTREGAS_EXAMENES', true);
 
@@ -482,33 +757,151 @@ export class GoogleCalendarAdapter {
     return this.createAcademicEvent(newPayload);
   }
 
+  /**
+   * Permanently marks an event as deleted, adds real-time CSS suppression rules,
+   * purges all matching DOM chips with a smooth animation, and updates persistent storage.
+   */
+  public markEventDeleted(eventId: string, title?: string, _subject?: string): void {
+    if (!eventId) return;
+    const cleanId = eventId.split(' ')[0].trim();
+    if (cleanId) this.deletedEventIds.add(cleanId);
+    this.deletedEventIds.add(eventId.trim());
+
+    try {
+      setIsolatedItem('gcal_deleted_events', JSON.stringify(Array.from(this.deletedEventIds)));
+    } catch (_) {}
+
+    this.applyDeletedEventsCss();
+
+    // Immediately purge from DOM without waiting for next mutation tick
+    if (typeof document !== 'undefined' && typeof document.querySelectorAll === 'function') {
+      const targets = document.querySelectorAll<HTMLElement>('[data-eventchip], [data-eventid]');
+      targets.forEach((el) => {
+        const id = el.getAttribute('data-eventid') || '';
+        const txt = (el.innerText || '') + ' ' + (el.getAttribute('aria-label') || '');
+        if (
+          (cleanId && (id.includes(cleanId) || txt.includes(cleanId))) ||
+          (title && title.length >= 3 && txt.includes(title.trim()))
+        ) {
+          const container = el.closest<HTMLElement>('[data-eventchip]') || el;
+          container.style.transition = 'opacity 0.2s ease, transform 0.2s ease';
+          container.style.opacity = '0';
+          container.style.transform = 'scale(0.92)';
+          container.style.pointerEvents = 'none';
+          setTimeout(() => container.remove(), 200);
+        }
+      });
+    }
+  }
+
+  /**
+   * Applies CSS rules hiding all deleted event chips. Even if Google Calendar
+   * tries to re-render them from client memory cache, the compositor keeps them invisible.
+   */
+  public applyDeletedEventsCss(): void {
+    if (typeof document === 'undefined') return;
+    const styleId = 'gcal-deleted-events-style';
+    let style = document.getElementById(styleId) as HTMLStyleElement | null;
+    if (!style) {
+      style = document.createElement('style');
+      style.id = styleId;
+      document.head.appendChild(style);
+    }
+
+    if (this.deletedEventIds.size === 0) {
+      style.textContent = '';
+      return;
+    }
+
+    const selectors: string[] = [];
+    this.deletedEventIds.forEach((id) => {
+      const safeId = id.replace(/["\\]/g, '');
+      if (safeId.length >= 2) {
+        selectors.push(`[data-eventid*="${safeId}"]`);
+        selectors.push(`[data-eventchip]:has([data-eventid*="${safeId}"])`);
+      }
+    });
+
+    if (selectors.length > 0) {
+      style.textContent = `
+        ${selectors.join(',\n')} {
+          display: none !important;
+          visibility: hidden !important;
+          pointer-events: none !important;
+          height: 0 !important;
+          max-height: 0 !important;
+          margin: 0 !important;
+          padding: 0 !important;
+          opacity: 0 !important;
+        }
+      `;
+    }
+  }
+
+  /**
+   * Refreshes the calendar grid by purging deleted events and re-applying chip enhancements.
+   * Avoids destructive week flipping which causes stale memory cache revival.
+   */
   public triggerGridRefresh(): void {
     try {
-      // 1. Dispatch Google Calendar refresh shortcut ('r') to invalidate in-memory event caches
-      if (typeof document !== 'undefined') {
-        const refreshKeyEv = new KeyboardEvent('keydown', { key: 'r', code: 'KeyR', bubbles: true });
-        document.dispatchEvent(refreshKeyEv);
-      }
+      this.applyDeletedEventsCss();
+      this.enhanceAcademicChips();
+    } catch (_) {}
+  }
 
-      // 2. Force view redraw via week navigation if available
-      const nextBtn = document.querySelector<HTMLButtonElement>(
-        'button[aria-label*="semana siguiente" i], button[aria-label*="next week" i]'
-      );
-      const prevBtn = document.querySelector<HTMLButtonElement>(
-        'button[aria-label*="semana anterior" i], button[aria-label*="previous week" i]'
-      );
-      if (nextBtn && prevBtn) {
-        nextBtn.click();
-        setTimeout(() => prevBtn.click(), 100);
+  /**
+   * Navigates or reloads the main Google Calendar window onto the target ISO date (YYYY-MM-DD)
+   * so events created/moved in the background BrowserWindow are fetched fresh from Google's servers
+   * and immediately visible on the calendar grid.
+   */
+  public navigateToEventDate(isoDate?: string, pendingToastMsg?: string): void {
+    try {
+      if (pendingToastMsg && typeof sessionStorage !== 'undefined') {
+        sessionStorage.setItem('gcal_pending_toast', pendingToastMsg);
+      }
+      if (typeof window === 'undefined' || !window.location) {
         return;
       }
 
-      // 3. Fallback to Today button
-      const todayBtn = document.querySelector<HTMLButtonElement>(
-        'button[aria-label*="Hoy" i], button[aria-label*="Today" i]'
-      );
-      if (todayBtn) {
-        todayBtn.click();
+      const currentHref = window.location.href || '';
+      if (!currentHref.startsWith('http')) {
+        return;
+      }
+
+      if (isoDate && /^\d{4}-\d{2}-\d{2}$/.test(isoDate)) {
+        const [yr, mo, dy] = isoDate.split('-').map(Number);
+        const uMatch = currentHref.match(/\/calendar\/u\/(\d+)/);
+        const uIdx = uMatch ? uMatch[1] : '0';
+        const viewMatch = currentHref.match(/\/r\/(day|week|month|year|schedule|customday)\b/i);
+
+        if (viewMatch) {
+          const viewMode = viewMatch[1].toLowerCase();
+          const targetUrl = `https://calendar.google.com/calendar/u/${uIdx}/r/${viewMode}/${yr}/${mo}/${dy}`;
+          const normalizedCurrent = currentHref.split('?')[0].split('#')[0].replace(/\/$/, '');
+          if (normalizedCurrent === targetUrl) {
+            window.location.reload();
+          } else {
+            window.location.href = targetUrl;
+          }
+          return;
+        }
+
+        // Bare /r default view: reload in place if event is near today, otherwise jump to target week
+        const now = new Date();
+        const todayMidnight = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
+        const targetMidnight = new Date(yr, mo - 1, dy).getTime();
+        const dayDiff = Math.abs(Math.round((targetMidnight - todayMidnight) / (1000 * 60 * 60 * 24)));
+
+        if (dayDiff <= 2 && typeof window.location.reload === 'function') {
+          window.location.reload();
+        } else {
+          window.location.href = `https://calendar.google.com/calendar/u/${uIdx}/r/week/${yr}/${mo}/${dy}`;
+        }
+        return;
+      }
+
+      if (typeof window.location.reload === 'function') {
+        window.location.reload();
       }
     } catch (_) {}
   }
@@ -725,7 +1118,8 @@ export class GoogleCalendarAdapter {
 
     const max = Math.max(r, g, b);
     const min = Math.min(r, g, b);
-    let h = 0, s = 0, l = (max + min) / 2;
+    const l = (max + min) / 2;
+    let h = 0, s = 0;
 
     if (max !== min) {
       const d = max - min;
@@ -757,7 +1151,7 @@ export class GoogleCalendarAdapter {
    * 1 Tipo (Badge pill) -> 2 Asignatura -> 3 Título (grande) -> 4 Descripción/Ubicación -> 5 Horas
    */
   public enhanceAcademicChips(): void {
-    if (typeof document === 'undefined') return;
+    if (typeof document === 'undefined' || typeof document.querySelectorAll !== 'function') return;
     const chips = Array.from(document.querySelectorAll<HTMLElement>('[data-eventchip]'));
     if (chips.length === 0) return;
 
@@ -767,6 +1161,19 @@ export class GoogleCalendarAdapter {
       const rawAria = chip.getAttribute('aria-label') || '';
       const ariaHidden = chip.querySelector('.XuJrye')?.textContent || '';
       const allText = `${chip.innerText || ''} ${rawAria} ${ariaHidden}`;
+      const chipEventId = (chip.getAttribute('data-eventid') || '').trim();
+
+      // Check if event is marked as deleted; purge immediately and skip
+      if (
+        this.deletedEventIds.size > 0 &&
+        Array.from(this.deletedEventIds).some(
+          (delId) => (chipEventId && chipEventId.includes(delId)) || (delId.length >= 4 && allText.includes(delId))
+        )
+      ) {
+        chip.style.display = 'none';
+        chip.remove();
+        return;
+      }
 
       const isAcademic = /\[?(EXAMEN|ENTREGA)\]?|calendario:\s*[^,]*(exam|ent[er]gra)|entrega|entegra|ex[aá]men|exam|parcial|control|quiz|deadline|assignment|due|klausur|pr[üu]fung|devoir/i.test(allText);
       if (!isAcademic) {
@@ -783,8 +1190,8 @@ export class GoogleCalendarAdapter {
         return;
       }
 
-      // Extract raw title from native title span or aria text
-      const titleSpan = chip.querySelector('.I0UMhf');
+      // Extract raw title from native title span (Week/Day: .I0UMhf, Month/Compact: .WBi6vc / .FAxxKc)
+      const titleSpan = chip.querySelector('.I0UMhf, .WBi6vc, .FAxxKc');
       const rawTitle = titleSpan ? (titleSpan.textContent || '').trim() : '';
 
       // Extract time from native element or text
@@ -836,11 +1243,13 @@ export class GoogleCalendarAdapter {
 
       // Extract description & cached subject from isolated storage if available
       let cachedDesc = '';
+      let cachedTermKey = '';
       try {
         const meta = JSON.parse(getIsolatedItem('gcal_academic_meta') || '{}');
         const cleanKey = title.toLowerCase().trim();
         const fullKey = `${cleanKey}_${subject.toLowerCase().trim()}`;
         cachedDesc = meta[fullKey]?.description || meta[cleanKey]?.description || '';
+        cachedTermKey = meta[fullKey]?.termKey || meta[cleanKey]?.termKey || '';
         if (!subject && (meta[cleanKey]?.subject || meta[fullKey]?.subject)) {
           subject = meta[cleanKey]?.subject || meta[fullKey]?.subject || '';
         }
@@ -875,6 +1284,46 @@ export class GoogleCalendarAdapter {
             subject = 'Asignatura General';
           }
         }
+      }
+
+      // Filter academic chips by active period when user has configured term subjects
+      if (this.hasExplicitTermSubjects()) {
+        const activeConfigured = this.getConfiguredSubjects();
+        let activeTermKey = '';
+        try {
+          const rawPlan = getIsolatedItem('gcal_academic_plan');
+          if (rawPlan) {
+            const p = JSON.parse(rawPlan);
+            if (p && p.currentYear && p.currentPeriod) {
+              activeTermKey = `Y${p.currentYear}-P${p.currentPeriod}`;
+            }
+          }
+        } catch (_) {}
+
+        const matchesActiveSubject = this.matchesConfiguredSubject(subject, activeConfigured);
+        const explicitlyCreatedInActiveTerm = Boolean(
+          activeTermKey && cachedTermKey && cachedTermKey === activeTermKey
+        );
+
+        if (explicitlyCreatedInActiveTerm || matchesActiveSubject) {
+          chip.removeAttribute('data-gcal-inactive-term');
+        } else {
+          const belongsToOtherTermByKey = Boolean(
+            activeTermKey && cachedTermKey && cachedTermKey !== activeTermKey
+          );
+          const belongsToOtherTermBySubj =
+            subject !== 'Asignatura General' &&
+            (activeConfigured.length === 0 || this.isArchivedInOtherTerm(subject, activeConfigured));
+
+          if (belongsToOtherTermByKey || belongsToOtherTermBySubj) {
+            chip.setAttribute('data-gcal-inactive-term', 'true');
+            return;
+          } else {
+            chip.removeAttribute('data-gcal-inactive-term');
+          }
+        }
+      } else {
+        chip.removeAttribute('data-gcal-inactive-term');
       }
 
       const finalDesc = cachedDesc || (locStr && !/sin ubicaci/i.test(locStr) ? locStr : '');
@@ -997,7 +1446,31 @@ export class GoogleCalendarAdapter {
     });
   }
 
+  private setupSelectionGuard(): void {
+    if (typeof document === 'undefined' || this.selectionListener) return;
+    this.selectionListener = () => {
+      try {
+        const sel = window.getSelection();
+        if (!sel || sel.isCollapsed) return;
+        const anchor = sel.anchorNode;
+        const el = anchor instanceof Element ? anchor : anchor?.parentElement;
+        if (
+          el &&
+          el.closest('[role="main"]') &&
+          !el.closest('input, textarea, [contenteditable="true"], [role="textbox"], [role="dialog"]')
+        ) {
+          sel.removeAllRanges();
+        }
+      } catch (_) {}
+    };
+    document.addEventListener('selectionchange', this.selectionListener);
+  }
+
   public destroy(): void {
+    if (this.selectionListener && typeof document !== 'undefined') {
+      document.removeEventListener('selectionchange', this.selectionListener);
+      this.selectionListener = null;
+    }
     if (this.chipPollInterval) {
       clearInterval(this.chipPollInterval);
       this.chipPollInterval = null;

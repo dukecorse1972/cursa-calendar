@@ -1,4 +1,5 @@
 const fs = require('fs');
+const path = require('path');
 
 async function main() {
   const res = await fetch('http://127.0.0.1:9222/json');
@@ -122,24 +123,27 @@ async function main() {
     console.log('Applied variant:', res);
   }
 
-  async function capture(filename) {
+  async function capture(fileName) {
     await new Promise(r => setTimeout(r, 400));
+    const outDir = path.resolve(__dirname, '..', '..', 'artifacts', 'debug-screenshots');
+    fs.mkdirSync(outDir, { recursive: true });
+    const filePath = path.join(outDir, fileName);
     const shot = await send('Page.captureScreenshot', { format: 'png' });
-    fs.writeFileSync(filename, Buffer.from(shot.data, 'base64'));
-    console.log('Saved:', filename);
+    fs.writeFileSync(filePath, Buffer.from(shot.data, 'base64'));
+    console.log('Saved:', filePath);
   }
 
   // Capture Variant 1
   await renderVariant(variant1HTML);
-  await capture('C:/Users/dario/Downloads/OPCION_1_BADGE_PRO.png');
+  await capture('OPCION_1_BADGE_PRO.png');
 
   // Capture Variant 2
   await renderVariant(variant2HTML);
-  await capture('C:/Users/dario/Downloads/OPCION_2_HEADER_SPLIT.png');
+  await capture('OPCION_2_HEADER_SPLIT.png');
 
   // Capture Variant 3
   await renderVariant(variant3HTML);
-  await capture('C:/Users/dario/Downloads/OPCION_3_PASO_A_PASO.png');
+  await capture('OPCION_3_PASO_A_PASO.png');
 
   // Restore original
   await send('Runtime.evaluate', {

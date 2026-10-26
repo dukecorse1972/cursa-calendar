@@ -1,6 +1,6 @@
 import { SubjectGradesConfig } from '../../shared/gradesTypes';
 import { getIsolatedItem, setIsolatedItem, removeIsolatedItem } from '../utils/storage';
-import { decomposeCompositeItems } from '../../shared/gradesCalculator';
+import { syncActiveTermGradesInArchive } from './academicPlanService';
 
 const GRADES_STORAGE_PREFIX = 'gcal_subject_grades_';
 
@@ -12,25 +12,23 @@ export function getSubjectGrades(subjectName: string): SubjectGradesConfig | nul
   try {
     const parsed = JSON.parse(raw) as SubjectGradesConfig;
     if (parsed && Array.isArray(parsed.items)) {
-      const atomicItems = decomposeCompositeItems(parsed.items);
-      if (atomicItems.length !== parsed.items.length) {
-        parsed.items = atomicItems;
-        saveSubjectGrades(parsed);
-      }
       return parsed;
     }
   } catch (_) {}
   return null;
 }
 
-export function saveSubjectGrades(config: SubjectGradesConfig): void {
+export function saveSubjectGrades(config: SubjectGradesConfig, skipArchiveSync: boolean = false): void {
   if (!config || !config.subjectName) return;
   const key = `${GRADES_STORAGE_PREFIX}${config.subjectName.toLowerCase().trim()}`;
   config.updatedAt = Date.now();
   setIsolatedItem(key, JSON.stringify(config));
+  if (!skipArchiveSync) {
+    syncActiveTermGradesInArchive();
+  }
 }
 
-export function deleteSubjectGrades(subjectName: string): void {
+export function deleteSubjectGrades(subjectName: string, skipArchiveSync: boolean = false): void {
   if (!subjectName) return;
   const cleanName = subjectName.toLowerCase().trim();
   const key = `${GRADES_STORAGE_PREFIX}${cleanName}`;
@@ -51,6 +49,10 @@ export function deleteSubjectGrades(subjectName: string): void {
       }
       toRemove.forEach((k) => localStorage.removeItem(k));
     } catch (_) {}
+  }
+
+  if (!skipArchiveSync) {
+    syncActiveTermGradesInArchive();
   }
 }
 

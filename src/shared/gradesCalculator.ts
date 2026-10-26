@@ -33,10 +33,13 @@ export function calculateAccumulatedScore(items: GradeItem[]): {
 export function calculateTargetRequiredGrade(
   items: GradeItem[],
   targetGrade: number,
-  minFinalGradeRequired?: number | null
+  minFinalGradeRequired?: number | null,
+  blockCutoffs?: Record<string, number>
 ): TargetGradeCalculation {
-  const { accumulatedPoints, gradedWeight, totalWeight } = calculateAccumulatedScore(items);
-  const remainingWeight = Math.max(0, 100 - gradedWeight);
+  const { accumulatedPoints, gradedWeight } = calculateAccumulatedScore(items);
+  const pendingItems = items.filter((it) => typeof it.grade !== 'number' || isNaN(it.grade));
+  const pendingWeightSum = Math.round(pendingItems.reduce((s, it) => s + it.weight, 0) * 10) / 10;
+  const remainingWeight = pendingItems.length > 0 ? pendingWeightSum : 0;
 
   if (remainingWeight === 0) {
     return {
@@ -58,15 +61,36 @@ export function calculateTargetRequiredGrade(
 
   let finalRequired = Math.max(0, roundedRequired);
   let isCutoffTriggered = false;
+  let effectiveCutoff: number | null =
+    typeof minFinalGradeRequired === 'number' && !isNaN(minFinalGradeRequired) ? minFinalGradeRequired : null;
+  let blockAlreadyFailed = false;
 
-  const cutoff = typeof minFinalGradeRequired === 'number' && !isNaN(minFinalGradeRequired) ? minFinalGradeRequired : null;
-
-  if (cutoff !== null && finalRequired < cutoff) {
-    finalRequired = cutoff;
+  if (effectiveCutoff !== null && finalRequired < effectiveCutoff) {
+    finalRequired = effectiveCutoff;
     isCutoffTriggered = true;
   }
 
-  const isPossible = finalRequired <= 10.0;
+  if (blockCutoffs && Object.keys(blockCutoffs).length > 0) {
+    const groups = groupGradeItems(items, blockCutoffs);
+    for (const group of groups) {
+      if (group.isCutoffImpossible) {
+        blockAlreadyFailed = true;
+      }
+      if (
+        typeof group.requiredGradeInPending === 'number' &&
+        !isNaN(group.requiredGradeInPending) &&
+        group.requiredGradeInPending > finalRequired
+      ) {
+        finalRequired = group.requiredGradeInPending;
+        isCutoffTriggered = true;
+        if (effectiveCutoff === null || (group.minGradeRequired && group.minGradeRequired > effectiveCutoff)) {
+          effectiveCutoff = group.minGradeRequired ?? effectiveCutoff;
+        }
+      }
+    }
+  }
+
+  const isPossible = !blockAlreadyFailed && finalRequired <= 10.0;
 
   return {
     targetGrade,
@@ -76,7 +100,7 @@ export function calculateTargetRequiredGrade(
     requiredFinalGrade: Math.round(finalRequired * 100) / 100,
     isPossible,
     isCutoffTriggered,
-    minCutoff: cutoff
+    minCutoff: effectiveCutoff
   };
 }
 
@@ -96,8 +120,23 @@ export function calculateSimulatedFinalGrade(
   failedBlockCutoff?: string;
 } {
   const cutoff = typeof minFinalGradeRequired === 'number' && !isNaN(minFinalGradeRequired) ? minFinalGradeRequired : null;
-  let isCutoffFailed = cutoff !== null && simulatedScore < cutoff;
+  let isCutoffFailed = false;
   let failedBlockCutoff: string | undefined = undefined;
+
+  if (cutoff !== null && items.length > 0) {
+    const finalExamItems = items.filter((it) => /final|global|problemas/i.test(it.name));
+    const examItems = finalExamItems.length > 0 ? finalExamItems : items.filter((it) => it.type === 'EXAMEN');
+    const cutoffTargets = examItems.length > 0 ? examItems : items;
+
+    for (const target of cutoffTargets) {
+      const effectiveGrade =
+        typeof target.grade === 'number' && !isNaN(target.grade) ? target.grade : simulatedScore;
+      if (effectiveGrade < cutoff) {
+        isCutoffFailed = true;
+        break;
+      }
+    }
+  }
 
   let totalPoints = 0;
   for (const item of items) {
@@ -217,8 +256,8 @@ export function decomposeCompositeItems(items: GradeItem[]): GradeItem[] {
         }
 
         // Clean part display names
-        let cleanPart1 = part1Raw.replace(/^\d+(?:\.\d+)?\s*%\s*(?:de\s+)?/i, '').trim();
-        let cleanPart2 = part2Raw.replace(/^\d+(?:\.\d+)?\s*%\s*(?:de\s+)?/i, '').trim();
+        const cleanPart1 = part1Raw.replace(/^\d+(?:\.\d+)?\s*%\s*(?:de\s+)?/i, '').trim();
+        const cleanPart2 = part2Raw.replace(/^\d+(?:\.\d+)?\s*%\s*(?:de\s+)?/i, '').trim();
 
         // Infer subcategory if not already set
         let sub = item.subcategory;
@@ -252,7 +291,7 @@ export function decomposeCompositeItems(items: GradeItem[]): GradeItem[] {
           name: cleanPart2,
           type: type2,
           weight: weight2,
-          grade: null,
+          grade: item.grade,
           category: item.category,
           subcategory: sub
         });
@@ -278,8 +317,13 @@ export function groupGradeItems(
   items: GradeItem[],
   blockCutoffs?: Record<string, number>
 ): GradeGroup[] {
-  // First, decompose any composite or fused items atomically
-  const atomicItems = decomposeCompositeItems(items);
+  // Only auto-decompose items that carry explicit composite percentage/parenthetical structure,
+  // preserving single user-created items such as "Memoria + Defensa" intact.
+  const atomicItems = items.flatMap((it) => {
+    const hasExplicitComposite =
+      /\([^)]+\+[^)]+\)|\[[^\]]+\+[^\]]+\]|\d+(?:\.\d+)?\s*%.*\+.*\d+(?:\.\d+)?\s*%/i.test(it.name);
+    return hasExplicitComposite ? decomposeCompositeItems([it]) : [it];
+  });
   const isSubtopicPattern = /^(tema\s*\d+|m[oó]dulo\s*\d+|unit\s*\d+|t\d+|pr[aá]ctica\s*\d+|lab\s*\d+)/i;
 
   // 1. Normalize each item into (macroCategory, subcategory, displayName)

@@ -78,7 +78,9 @@ async function main() {
   await new Promise(r => setTimeout(r, 500));
 
   const shot = await send('Page.captureScreenshot', { format: 'png' });
-  const outPath = 'C:/Users/dario/.gemini/antigravity-cli/brain/6544cf7f-1dfe-40fe-a167-e62c0b3da130/SOLUCIONES_COLOR_ASIGNATURA.png';
+  const outDir = path.resolve(__dirname, '..', '..', 'artifacts', 'debug-screenshots');
+  fs.mkdirSync(outDir, { recursive: true });
+  const outPath = path.join(outDir, 'SOLUCIONES_COLOR_ASIGNATURA.png');
   fs.writeFileSync(outPath, Buffer.from(shot.data, 'base64'));
   console.log('Saved solutions screenshot to:', outPath);
 

@@ -6,6 +6,7 @@ import { CreatorModal } from './ui/creatorModal';
 import { AcademicDetailModal } from './ui/detailModal';
 import { OnboardingModal } from './ui/onboardingModal';
 import { GradesModule } from './ui/grades/gradesModule';
+import { FullEditorNavigation } from './ui/fullEditorNavigation';
 
 let isInitialized = false;
 
@@ -16,6 +17,7 @@ export function initCustomLayer(): void {
   }
 
   if (isInitialized) {
+    FullEditorNavigation.getInstance().update();
     AcademicPanel.getInstance().mountInTopHeader();
     GradesModule.getInstance().transformCalendarLogoTextIntoDropdown();
     return;
@@ -42,6 +44,10 @@ export function initCustomLayer(): void {
       const gradesModule = GradesModule.getInstance();
       gradesModule.init();
 
+      // 5. Initialize Full Editor Navigation (Safe Return from /r/eventedit/)
+      const fullEditorNav = FullEditorNavigation.getInstance();
+      fullEditorNav.init();
+
       isInitialized = true;
       console.log('[GoogleCalendarDesktop] Custom Academic Layer initialized successfully.');
     } catch (err) {
@@ -65,7 +71,8 @@ export function destroyCustomLayer(): void {
   CreatorModal.getInstance().destroy();
   AcademicDetailModal.getInstance().destroy();
   OnboardingModal.getInstance().close();
-  GradesModule.getInstance().showCalendarView();
+  GradesModule.getInstance().destroy();
+  FullEditorNavigation.getInstance().destroy();
   AppState.getInstance().destroy();
   isInitialized = false;
 }

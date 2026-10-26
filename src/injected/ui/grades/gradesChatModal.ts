@@ -1,6 +1,7 @@
 import { safeSetInnerHTML, escapeHtml, setupFocusTrap } from '../../utils/dom';
 import { GeminiGradesService } from '../../services/geminiGradesService';
 import { AISyllabusExtraction, SubjectGradesConfig } from '../../../shared/gradesTypes';
+import { decomposeCompositeItems } from '../../../shared/gradesCalculator';
 import { saveSubjectGrades } from '../../services/gradesStorage';
 
 export class GradesChatModal {
@@ -414,7 +415,9 @@ export class GradesChatModal {
 
     const div = document.createElement('div');
     div.style.cssText = 'display: flex; gap: 12px; align-items: flex-start;';
-    div.innerHTML = `
+    safeSetInnerHTML(
+      div,
+      `
       <div style="
         width: 32px;
         height: 32px;
@@ -438,7 +441,8 @@ export class GradesChatModal {
         line-height: 1.6;
         max-width: 88%;
       ">${html}</div>
-    `;
+    `
+    );
     container.appendChild(div);
     container.scrollTop = container.scrollHeight;
   }
@@ -452,10 +456,13 @@ export class GradesChatModal {
       const loadingDiv = document.createElement('div');
       loadingDiv.id = loadingId;
       loadingDiv.style.cssText = 'display: flex; gap: 12px; align-items: center; color: var(--gcal-secondary-text, #9aa0a6); font-size: 13px; padding-left: 44px;';
-      loadingDiv.innerHTML = `
+      safeSetInnerHTML(
+        loadingDiv,
+        `
         <div style="width: 18px; height: 18px; border: 2px solid var(--gcal-accent, #8ab4f8); border-top-color: transparent; border-radius: 50%; animation: spin 0.8s linear infinite;"></div>
         <span>Razonando con Gemini 2.5 Flash...</span>
-      `;
+      `
+      );
       container.appendChild(loadingDiv);
       container.scrollTop = container.scrollHeight;
     }
@@ -625,20 +632,22 @@ export class GradesChatModal {
   private finishAndCreate(): void {
     if (!this.pendingExtraction) return;
 
+    const rawItems = this.pendingExtraction.items.map((it, idx) => ({
+      id: `item_${Date.now()}_${idx}`,
+      name: it.name,
+      type: it.type,
+      weight: it.weight,
+      grade: it.grade !== undefined && it.grade !== null ? it.grade : null,
+      category: it.category,
+      subcategory: it.subcategory
+    }));
+
     const config: SubjectGradesConfig = {
       subjectName: this.currentSubject,
       credits: this.currentCredits,
       minFinalGradeRequired: this.pendingExtraction.minFinalGradeRequired || undefined,
       blockCutoffs: this.pendingExtraction.blockCutoffs || undefined,
-      items: this.pendingExtraction.items.map((it, idx) => ({
-        id: `item_${Date.now()}_${idx}`,
-        name: it.name,
-        type: it.type,
-        weight: it.weight,
-        grade: it.grade !== undefined && it.grade !== null ? it.grade : null,
-        category: it.category,
-        subcategory: it.subcategory
-      })),
+      items: decomposeCompositeItems(rawItems),
       updatedAt: Date.now()
     };
 

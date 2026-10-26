@@ -1,5 +1,6 @@
 import { AppTab, ThemeMode } from '../shared/types';
 import { CALENDAR_GROUPS } from '../shared/constants';
+import { getIsolatedItem, setIsolatedItem } from './utils/storage';
 
 export interface AppStateData {
   activeTab: AppTab;
@@ -26,11 +27,10 @@ export class AppState {
   private constructor() {
     let initialTab: AppTab = 'CLASES';
     try {
-      if (typeof localStorage !== 'undefined') {
-        const stored = localStorage.getItem('gcal_active_tab') as AppTab;
-        if (stored === 'CLASES' || stored === 'ENTREGAS_EXAMENES' || stored === 'TODO') {
-          initialTab = stored;
-        }
+      const stored = (getIsolatedItem('gcal_active_tab') ||
+        (typeof localStorage !== 'undefined' ? localStorage.getItem('gcal_active_tab') : null)) as AppTab | null;
+      if (stored === 'CLASES' || stored === 'ENTREGAS_EXAMENES' || stored === 'TODO') {
+        initialTab = stored;
       }
     } catch (_) {}
 
@@ -54,12 +54,13 @@ export class AppState {
   }
 
   public setActiveTab(tab: AppTab): void {
-    if (this.state.activeTab === tab) return;
     try {
+      setIsolatedItem('gcal_active_tab', tab);
       if (typeof localStorage !== 'undefined') {
         localStorage.setItem('gcal_active_tab', tab);
       }
     } catch (_) {}
+    if (this.state.activeTab === tab) return;
     this.state = { ...this.state, activeTab: tab };
     this.notify();
   }

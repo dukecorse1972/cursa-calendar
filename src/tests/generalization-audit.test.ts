@@ -179,15 +179,61 @@ describe('18. Whitelist-Based isClass Classification [P0-02]', () => {
     assert.ok(!adapter.isClass('Tareas'));
     assert.ok(!adapter.isClass('Mi Calendario'));
   });
+
+  test('isClass excludes personal primary calendar matching active Google profile name or email, and getDetectedClasses prioritizes Onboarding subjects over DOM', () => {
+    const prevDoc = (global as any).document;
+    try {
+      const mockAccountHeader = {
+        getAttribute: (attr: string) => {
+          if (attr === 'data-email') return 'dario.estudiante@uni.es';
+          if (attr === 'aria-label') return 'Cuenta de Google: Dario Estudiante (dario.estudiante@uni.es)';
+          return null;
+        }
+      };
+
+      const makeCheckbox = (label: string) => ({
+        getAttribute: (attr: string) => (attr === 'aria-label' ? label : null),
+        closest: () => ({ textContent: label })
+      });
+
+      const mockCheckboxes = [
+        makeCheckbox('Dario Estudiante'),
+        makeCheckbox('dario.estudiante@uni.es'),
+        makeCheckbox('Cumpleaños'),
+        makeCheckbox('Exámenes'),
+        makeCheckbox('Redes de Computadores')
+      ];
+
+      (global as any).document = {
+        querySelector: (sel: string) => (sel.includes('SignOutOptions') ? mockAccountHeader : null),
+        querySelectorAll: (sel: string) => (sel.includes('checkbox') ? mockCheckboxes : [])
+      };
+
+      setIsolatedItem('gcal_academic_subjects', JSON.stringify([
+        { name: 'Álgebra Lineal', color: '#98D5E8' },
+        { name: 'Física I', color: '#A1D0CA' }
+      ]));
+
+      assert.ok(!adapter.isClass('Dario Estudiante'), 'User primary calendar matching display name must be excluded');
+      assert.ok(!adapter.isClass('dario.estudiante@uni.es'), 'User primary calendar matching email must be excluded');
+      assert.ok(!adapter.isClass('otro.correo@gmail.com'), 'Email-named personal calendar must be excluded');
+
+      const detected = adapter.getDetectedClasses();
+      assert.deepEqual(detected, ['Álgebra Lineal', 'Física I'], 'Active term configured subjects must strictly determine detected classes without leaking other periods');
+      assert.ok(!detected.includes('Dario Estudiante'), 'Personal primary calendar must not leak into detected classes');
+      assert.ok(!detected.includes('Cumpleaños'));
+      assert.ok(!detected.includes('Exámenes'));
+    } finally {
+      (global as any).document = prevDoc;
+    }
+  });
 });
 
 describe('19. AppState Calendar Visibility DOM Synchronization [P2-04]', () => {
   test('Toggling calendar visibility in AppState notifies listeners and persists', () => {
     const appState = AppState.getInstance();
-    let notifiedCal = '';
-    let notifiedVis = false;
 
-    const unsubscribe = appState.subscribe((state) => {
+    const unsubscribe = appState.subscribe((_state) => {
       // Find changed
     });
 
@@ -196,6 +242,7 @@ describe('19. AppState Calendar Visibility DOM Synchronization [P2-04]', () => {
 
     appState.setCalendarVisibility('Matemáticas', true);
     assert.equal(appState.getState().selectedCalendars['Matemáticas'], true);
+    unsubscribe();
   });
 });
 

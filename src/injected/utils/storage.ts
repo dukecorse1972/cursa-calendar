@@ -4,7 +4,7 @@
  * Falls back transparently to global keys in test or pre-login environments.
  */
 
-export function getActiveUserIdentifier(): string {
+function getActiveUserIdentifier(): string {
   if (typeof window === 'undefined' || typeof document === 'undefined') {
     return '';
   }
@@ -18,26 +18,73 @@ export function getActiveUserIdentifier(): string {
     if (accountButton) {
       const emailAttr = accountButton.getAttribute('data-email');
       if (emailAttr && emailAttr.includes('@')) {
-        return emailAttr.toLowerCase().replace(/[^a-z0-9_]/g, '_');
+        const sanitized = emailAttr.toLowerCase().replace(/[^a-z0-9_]/g, '_');
+        cacheSessionUserIdentifier(sanitized);
+        return sanitized;
       }
 
       const ariaLabel = accountButton.getAttribute('aria-label') || '';
       const emailMatch = ariaLabel.match(/([a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,})/);
       if (emailMatch) {
-        return emailMatch[1].toLowerCase().replace(/[^a-z0-9_]/g, '_');
+        const sanitized = emailMatch[1].toLowerCase().replace(/[^a-z0-9_]/g, '_');
+        cacheSessionUserIdentifier(sanitized);
+        return sanitized;
       }
     }
 
     // 2. Extract multi-account path index from URL (/calendar/u/0/r)
     const pathMatch = window.location.pathname.match(/\/calendar\/u\/(\d+)\//);
     if (pathMatch) {
-      return `u${pathMatch[1]}`;
+      const slot = `u${pathMatch[1]}`;
+      try {
+        if (typeof sessionStorage !== 'undefined') {
+          const cachedEmail = sessionStorage.getItem(`cursa_account_map_${slot}`);
+          if (cachedEmail) {
+            return cachedEmail;
+          }
+        }
+      } catch (_) {}
+      return slot;
     }
   } catch (_) {
     // Fallback on any error
   }
 
   return '';
+}
+
+function cacheSessionUserIdentifier(emailId: string): void {
+  if (!emailId || typeof window === 'undefined' || typeof sessionStorage === 'undefined') return;
+  try {
+    const pathMatch = window.location.pathname.match(/\/calendar\/u\/(\d+)\//);
+    const slot = pathMatch ? `u${pathMatch[1]}` : 'u0';
+    sessionStorage.setItem(`cursa_account_map_${slot}`, emailId);
+  } catch (_) {}
+}
+
+export function clearSessionAccountCache(): void {
+  try {
+    if (typeof sessionStorage !== 'undefined') {
+      const toDelete: string[] = [];
+      for (let i = 0; i < sessionStorage.length; i++) {
+        const k = sessionStorage.key(i);
+        if (k && k.startsWith('cursa_account_map_')) {
+          toDelete.push(k);
+        }
+      }
+      toDelete.forEach((k) => sessionStorage.removeItem(k));
+    }
+    if (typeof localStorage !== 'undefined') {
+      const transientKeys: string[] = [];
+      for (let i = 0; i < localStorage.length; i++) {
+        const k = localStorage.key(i);
+        if (k && /^gcal_u\d+_/.test(k)) {
+          transientKeys.push(k);
+        }
+      }
+      transientKeys.forEach((k) => localStorage.removeItem(k));
+    }
+  } catch (_) {}
 }
 
 export function getIsolatedKey(baseKey: string, customUserId?: string | null): string {

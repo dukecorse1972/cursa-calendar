@@ -10,6 +10,7 @@ export class GradesModule {
   private dropdownMenuEl: HTMLElement | null = null;
   private originalText: string = 'Calendar';
   private clickOutsideListener: ((e: MouseEvent) => void) | null = null;
+  private cleanupCallbacks: Array<() => void> = [];
 
   public static getInstance(): GradesModule {
     if (!GradesModule.instance) {
@@ -21,6 +22,9 @@ export class GradesModule {
   private constructor() {}
 
   public init(): void {
+    // Clear any prior listeners if re-initializing
+    this.cleanupListenersOnly();
+
     // 1. Remove any legacy separate button if it was added
     const oldBtn = document.getElementById('cursa-header-switcher-btn');
     if (oldBtn) oldBtn.remove();
@@ -38,6 +42,7 @@ export class GradesModule {
         clearInterval(retryInterval);
       }
     }, 250);
+    this.cleanupCallbacks.push(() => clearInterval(retryInterval));
 
     // 3. Setup observation to keep brand text hooked across view updates
     this.setupObservation();
@@ -206,7 +211,7 @@ export class GradesModule {
   }
 
   private createOverlayContainer(): void {
-    let existing = document.getElementById('cursa-grades-view-overlay');
+    const existing = document.getElementById('cursa-grades-view-overlay');
     if (existing) {
       this.overlayEl = existing;
       return;
@@ -529,64 +534,63 @@ export class GradesModule {
   }
 
   private setupGlobalCaptureClickListener(): void {
-    window.addEventListener(
-      'click',
-      (e: MouseEvent) => {
-        const target = e.target as HTMLElement | null;
-        if (!target) return;
+    const handleGlobalClick = (e: MouseEvent) => {
+      const target = e.target as HTMLElement | null;
+      if (!target) return;
 
-        // If click is inside the dropdown menu itself, let menu handlers process it
-        if (target.closest('#cursa-brand-dropdown-menu')) {
-          return;
-        }
+      // If click is inside the dropdown menu itself, let menu handlers process it
+      if (target.closest('#cursa-brand-dropdown-menu')) {
+        return;
+      }
 
-        // Direct hit on trigger or child
-        if (
-          target.closest('#cursa-brand-logo-trigger') ||
-          target.id === 'cursa-brand-logo-trigger' ||
-          target.closest('#cursa-brand-chevron') ||
-          target.classList.contains('cursa-brand-text-label')
-        ) {
+      // Direct hit on trigger or child
+      if (
+        target.closest('#cursa-brand-logo-trigger') ||
+        target.id === 'cursa-brand-logo-trigger' ||
+        target.closest('#cursa-brand-chevron') ||
+        target.classList.contains('cursa-brand-text-label')
+      ) {
+        e.preventDefault();
+        e.stopPropagation();
+        e.stopImmediatePropagation();
+        this.toggleDropdownMenu();
+        return;
+      }
+
+      // Top-left header brand zone click interception (Y <= 70, X <= 380)
+      if (e.clientY >= 0 && e.clientY < 70 && e.clientX >= 0 && e.clientX < 380) {
+        // Exclude hamburger menu, today button, navigation arrows, academic capsule
+        const isNavButton = target.closest(
+          'button, [role="button"][aria-label*="Menú" i], [role="button"][aria-label*="Menu" i], [aria-label*="Hoy" i], [aria-label*="Today" i], [jsname="A5xsud"], .gcal-tabs-pill-box'
+        );
+        if (isNavButton) return;
+
+        const txt = (target.textContent || '').trim().toLowerCase();
+        const aria = (target.getAttribute('aria-label') || '').toLowerCase();
+        const isBrand =
+          txt.includes('calendario') ||
+          txt.includes('calendar') ||
+          txt.includes('calificaciones') ||
+          aria.includes('calendario') ||
+          aria.includes('calendar') ||
+          target.closest('a[href*="calendar"]') ||
+          target.closest('#cursa-brand-logo-trigger');
+
+        if (isBrand) {
           e.preventDefault();
           e.stopPropagation();
           e.stopImmediatePropagation();
           this.toggleDropdownMenu();
-          return;
         }
+      }
+    };
 
-        // Top-left header brand zone click interception (Y <= 70, X <= 380)
-        if (e.clientY >= 0 && e.clientY < 70 && e.clientX >= 0 && e.clientX < 380) {
-          // Exclude hamburger menu, today button, navigation arrows, academic capsule
-          const isNavButton = target.closest(
-            'button, [role="button"][aria-label*="Menú" i], [role="button"][aria-label*="Menu" i], [aria-label*="Hoy" i], [aria-label*="Today" i], [jsname="A5xsud"], .gcal-tabs-pill-box'
-          );
-          if (isNavButton) return;
-
-          const txt = (target.textContent || '').trim().toLowerCase();
-          const aria = (target.getAttribute('aria-label') || '').toLowerCase();
-          const isBrand =
-            txt.includes('calendario') ||
-            txt.includes('calendar') ||
-            txt.includes('calificaciones') ||
-            aria.includes('calendario') ||
-            aria.includes('calendar') ||
-            target.closest('a[href*="calendar"]') ||
-            target.closest('#cursa-brand-logo-trigger');
-
-          if (isBrand) {
-            e.preventDefault();
-            e.stopPropagation();
-            e.stopImmediatePropagation();
-            this.toggleDropdownMenu();
-          }
-        }
-      },
-      true // Capture phase to intercept before Google Calendar SPA navigation
-    );
+    window.addEventListener('click', handleGlobalClick, true);
+    this.cleanupCallbacks.push(() => window.removeEventListener('click', handleGlobalClick, true));
   }
 
   private setupKeyboardShortcuts(): void {
-    window.addEventListener('keydown', (e) => {
+    const handleKeydown = (e: KeyboardEvent) => {
       if (e.key === 'Escape') {
         if (this.dropdownMenuEl) {
           this.closeDropdownMenu();
@@ -600,6 +604,32 @@ export class GradesModule {
           }
         }
       }
-    });
+    };
+    window.addEventListener('keydown', handleKeydown);
+    this.cleanupCallbacks.push(() => window.removeEventListener('keydown', handleKeydown));
+  }
+
+  private cleanupListenersOnly(): void {
+    while (this.cleanupCallbacks.length > 0) {
+      const fn = this.cleanupCallbacks.pop();
+      try {
+        if (fn) fn();
+      } catch (_) {}
+    }
+    if (this.observer) {
+      this.observer.disconnect();
+      this.observer = null;
+    }
+  }
+
+  public destroy(): void {
+    this.closeDropdownMenu();
+    this.showCalendarView();
+    this.cleanupListenersOnly();
+    if (this.overlayEl && this.overlayEl.parentNode) {
+      this.overlayEl.parentNode.removeChild(this.overlayEl);
+      this.overlayEl = null;
+    }
+    GradesModule.instance = null;
   }
 }

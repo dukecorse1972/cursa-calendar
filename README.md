@@ -15,9 +15,10 @@
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/Tests-90%2F90%20Passing-brightgreen?style=flat-square&logo=node.js&logoColor=white" alt="Tests" />
-  <img src="https://img.shields.io/badge/Electron-33.4.11-47848F?style=flat-square&logo=electron&logoColor=white" alt="Electron" />
-  <img src="https://img.shields.io/badge/TypeScript-5.7.2-3178C6?style=flat-square&logo=typescript&logoColor=white" alt="TypeScript" />
+  <img src="https://img.shields.io/badge/Versi%C3%B3n-1.1.2-059669?style=flat-square" alt="Versión" />
+  <img src="https://img.shields.io/badge/Tests-115%2F115%20Passing-brightgreen?style=flat-square&logo=node.js&logoColor=white" alt="Tests" />
+  <img src="https://img.shields.io/badge/Electron-44.9.3-47848F?style=flat-square&logo=electron&logoColor=white" alt="Electron" />
+  <img src="https://img.shields.io/badge/TypeScript-5.9.3-3178C6?style=flat-square&logo=typescript&logoColor=white" alt="TypeScript" />
   <img src="https://img.shields.io/badge/Licencia-MIT-yellow?style=flat-square" alt="Licencia" />
   <img src="https://img.shields.io/badge/Windows-10%20%7C%2011-0078D4?style=flat-square&logo=windows&logoColor=white" alt="Windows" />
 </p>
@@ -149,7 +150,7 @@ cd cursa
 # 2. Instalar dependencias
 npm install
 
-# 3. Ejecutar las 84 pruebas automatizadas
+# 3. Ejecutar las 115 pruebas automatizadas
 npm test
 
 # 4. Iniciar en desarrollo
@@ -160,10 +161,12 @@ npm start
 | Comando | Función |
 |---|---|
 | `npm start` | Compila TypeScript y arranca la app en Electron |
-| `npm test` | Ejecuta la suite de 84 pruebas unitarias con el runner nativo de Node.js |
+| `npm test` | Ejecuta la suite de 115 pruebas unitarias (26 suites) con el runner nativo de Node.js |
 | `npm run pack` | Empaqueta la versión portable en `release/win-unpacked/` |
 | `npm run dist` | Genera el instalador oficial NSIS (`.exe`) en `release/` |
 | `npm run shortcut` | Genera o repara los accesos directos en Windows |
+
+> 🛡️ **Contratos de Arquitectura e Invariantes**: Para evitar regresiones en operaciones críticas (añadir, eliminar y mover eventos, sincronización y aislamiento de periodos), consulta el documento canónico [docs/CONTRATOS_INTOCABLES.md](docs/CONTRATOS_INTOCABLES.md).
 
 ### Arquitectura en 4 Capas
 ```mermaid
@@ -190,6 +193,7 @@ flowchart TD
         Adapter["GoogleCalendarAdapter (Estilos y Filtro CSS)"]
         Gear["Integración ⚙️ (Ajustes de Curso)"]
         Modals["Modales: Creación, Detalle y Ajustes"]
+        Grades["GradesModule & Simulador Gemini"]
     end
 
     Tray --> Window
@@ -200,6 +204,7 @@ flowchart TD
     API --> Val
     API --> Injected
     Injected --> Adapter
+    Injected --> Grades
 ```
 </details>
 

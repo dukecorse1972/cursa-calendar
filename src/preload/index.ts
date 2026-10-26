@@ -1,9 +1,23 @@
 import { contextBridge, ipcRenderer } from 'electron';
-import { initCustomLayer } from '../injected/index';
+import { initCustomLayer, destroyCustomLayer } from '../injected/index';
 import { AppState } from '../injected/state';
 import { OnboardingModal } from '../injected/ui/onboardingModal';
 import { GradesSimulatorView } from '../injected/ui/grades/gradesSimulatorView';
 import { GradesModule } from '../injected/ui/grades/gradesModule';
+import { clearSessionAccountCache } from '../injected/utils/storage';
+
+function isAllowedPreloadOrigin(): boolean {
+  try {
+    if (typeof window === 'undefined' || !window.location) return false;
+    return (
+      window.location.origin === 'https://calendar.google.com' ||
+      window.location.protocol === 'file:' ||
+      window.location.protocol === 'about:'
+    );
+  } catch {
+    return false;
+  }
+}
 
 const desktopApi = {
   createAcademicEventBackground: (payload: any) =>
@@ -20,26 +34,28 @@ const desktopApi = {
     ipcRenderer.invoke('take-debug-screenshot', filePath)
 };
 
-try {
-  contextBridge.exposeInMainWorld('gcalDesktopAPI', desktopApi);
-  contextBridge.exposeInMainWorld('cursaMountSimulator', (parent: HTMLElement, subject?: string) => {
+if (isAllowedPreloadOrigin()) {
+  try {
+    contextBridge.exposeInMainWorld('gcalDesktopAPI', desktopApi);
+    contextBridge.exposeInMainWorld('cursaMountSimulator', (parent: HTMLElement, subject?: string) => {
+      const view = GradesSimulatorView.getInstance();
+      if (subject) view.setActiveSubject(subject);
+      view.mount(parent);
+    });
+  } catch (_) {}
+
+  (window as any).gcalDesktopAPI = desktopApi;
+  (window as any).cursaMountSimulator = (parent: HTMLElement, subject?: string) => {
     const view = GradesSimulatorView.getInstance();
     if (subject) view.setActiveSubject(subject);
     view.mount(parent);
-  });
-} catch (_) {}
-
-(window as any).gcalDesktopAPI = desktopApi;
-(window as any).cursaMountSimulator = (parent: HTMLElement, subject?: string) => {
-  const view = GradesSimulatorView.getInstance();
-  if (subject) view.setActiveSubject(subject);
-  view.mount(parent);
-};
-(window as any).cursaGradesModule = GradesModule.getInstance();
+  };
+  (window as any).cursaGradesModule = GradesModule.getInstance();
+}
 
 function runIfCalendar(): void {
   try {
-    if (window.location.hostname.includes('calendar.google.com')) {
+    if (window.location.origin === 'https://calendar.google.com') {
       initCustomLayer();
     }
   } catch (err) {
@@ -80,5 +96,15 @@ ipcRenderer.on('open-academic-settings', () => {
     OnboardingModal.getInstance().open(true);
   } catch (err) {
     console.error('[Preload] Error opening academic settings from tray:', err);
+  }
+});
+
+// 7. Listen for Google sign-out signal to clear transient session state
+ipcRenderer.on('user-logged-out', () => {
+  try {
+    clearSessionAccountCache();
+    destroyCustomLayer();
+  } catch (err) {
+    console.error('[Preload] Error resetting session state on logout:', err);
   }
 });

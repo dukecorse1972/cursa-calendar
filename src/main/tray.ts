@@ -1,7 +1,7 @@
 import { app, Menu, Tray, BrowserWindow } from 'electron';
 import * as path from 'path';
 import * as fs from 'fs';
-import { setIsQuitting } from './window';
+import { setIsQuitting } from './lifecycle';
 
 let tray: Tray | null = null;
 
@@ -111,10 +111,6 @@ export function setupTray(mainWindow: BrowserWindow): Tray {
     mainWindow.focus();
   });
 
-  return tray;
-}
-
-export function getTray(): Tray | null {
   return tray;
 }
 

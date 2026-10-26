@@ -1,4 +1,4 @@
-import test, { describe, it } from 'node:test';
+import { describe, it } from 'node:test';
 import assert from 'node:assert';
 import { GradeItem } from '../shared/gradesTypes';
 import {
@@ -98,6 +98,64 @@ describe('22. Grades Simulator & Evaluation Calculation Engine', () => {
     const simFail = calculateSimulatedFinalGrade(items, 3.5, 4.0);
     assert.strictEqual(simFail.isCutoffFailed, true);
     assert.strictEqual(simFail.minCutoff, 4.0);
+  });
+
+  it('does not falsely fail cutoff when 100% of items are already graded above cutoff regardless of slider value', () => {
+    const fullyGraded: GradeItem[] = [
+      { id: '1', name: 'Parcial', type: 'EXAMEN', weight: 40, grade: 8.0 },
+      { id: '2', name: 'Examen Final', type: 'EXAMEN', weight: 60, grade: 7.5 }
+    ];
+
+    const sim = calculateSimulatedFinalGrade(fullyGraded, 2.0, 4.0);
+    assert.strictEqual(sim.finalGrade, 7.70);
+    assert.strictEqual(sim.isCutoffFailed, false);
+
+    const failedRealFinal: GradeItem[] = [
+      { id: '1', name: 'Práctica pendiente', type: 'ENTREGA', weight: 20, grade: null },
+      { id: '2', name: 'Examen Final', type: 'EXAMEN', weight: 80, grade: 3.0 }
+    ];
+    const simRealFail = calculateSimulatedFinalGrade(failedRealFinal, 9.0, 4.0);
+    assert.strictEqual(simRealFail.isCutoffFailed, true);
+  });
+
+  it('enforces independent blockCutoffs in calculateTargetRequiredGrade and preserves manual items containing "+" in storage', () => {
+    const blockItems: GradeItem[] = [
+      { id: '1', name: 'Prácticas', type: 'ENTREGA', weight: 50, grade: 9.0, category: 'Prácticas' }, // 4.5 pts
+      { id: '2', name: 'Examen Teoría', type: 'EXAMEN', weight: 50, grade: null, category: 'Teoría' }
+    ];
+    // Mathematically needs only (5.0 - 4.5) / 0.5 = 1.0, but Teoría block requires 4.0!
+    const target = calculateTargetRequiredGrade(blockItems, 5.0, null, { Teoría: 4.0, Prácticas: 4.0 });
+    assert.strictEqual(target.requiredFinalGrade, 4.0);
+    assert.strictEqual(target.isCutoffTriggered, true);
+
+    if (typeof (global as any).localStorage === 'undefined') {
+      const store: Record<string, string> = {};
+      (global as any).localStorage = {
+        getItem: (k: string) => store[k] ?? null,
+        setItem: (k: string, v: string) => { store[k] = v; },
+        removeItem: (k: string) => { delete store[k]; },
+        clear: () => { Object.keys(store).forEach((k) => delete store[k]); },
+        key: (i: number) => Object.keys(store)[i] ?? null,
+        get length() { return Object.keys(store).length; }
+      };
+    }
+
+    saveSubjectGrades({
+      subjectName: 'Ingeniería del Software',
+      credits: 6,
+      items: [
+        { id: 'm1', name: 'Memoria + Defensa', type: 'ENTREGA', weight: 40, grade: 8.0 },
+        { id: 'm2', name: 'Examen Final', type: 'EXAMEN', weight: 60, grade: null }
+      ],
+      updatedAt: Date.now()
+    });
+
+    const loaded = getSubjectGrades('Ingeniería del Software');
+    assert.ok(loaded);
+    assert.strictEqual(loaded.items.length, 2, 'Manual item with + must not be split in storage');
+    assert.strictEqual(loaded.items[0].grade, 8.0);
+    assert.strictEqual(calculateAccumulatedScore(loaded.items).accumulatedPoints, 3.20);
+    deleteSubjectGrades('Ingeniería del Software');
   });
 });
 
@@ -327,6 +385,18 @@ Tema 4: 20% Memoria técnica + 80% Examen.`;
     assert.strictEqual(examen2.weight, 10, 'Examen must weigh 10% (80% of 12.5%)');
     assert.ok(memoria2.grade === null || memoria2.grade === undefined, 'Must be unassigned/pending');
     assert.ok(examen2.grade === null || examen2.grade === undefined, 'Must be unassigned/pending');
+  });
+
+  it('offline fallback sums to 100% without inventing 30% practices or hardcoded dates on two-component syllabi', () => {
+    const service = GeminiGradesService.getInstance();
+    const res = service.extractSyllabusOfflineFallback('Álgebra', 'Examen final 70% y parciales 30%');
+    const sum = res.items.reduce((s, it) => s + it.weight, 0);
+    assert.strictEqual(sum, 100);
+    assert.ok(!res.items.some((it) => it.dateHint === '25/01/2027'));
+
+    const res2 = service.extractSyllabusOfflineFallback('Sistemas', '50% teoría y 50% prácticas');
+    assert.strictEqual(res2.items.reduce((s, it) => s + it.weight, 0), 100);
+    assert.ok(!res2.items.some((it) => it.dateHint === '25/01/2027'));
   });
 });
 

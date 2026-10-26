@@ -1,6 +1,6 @@
 import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
-import { CALENDAR_GROUPS, TARGET_CALENDARS, GOOGLE_CALENDAR_URL, PARTITION_NAME } from '../shared/constants';
+import { CALENDAR_GROUPS, TARGET_CALENDARS, PARTITION_NAME } from '../shared/constants';
 import { getTokens, LIGHT_THEME, DARK_THEME } from '../injected/theme/tokens';
 import { AppState } from '../injected/state';
 
@@ -130,18 +130,34 @@ describe('12. Academic Tab Keyboard Navigation & Shortcuts Contract', () => {
     assert.equal(appState.getState().activeTab, 'TODO');
   });
 
-  test('Input detection correctly suppresses shortcut triggers when typing', () => {
-    const shouldSuppress = (elTag: string, hasModifier: boolean) => {
-      if (hasModifier) return true;
-      const inputTags = ['INPUT', 'TEXTAREA', 'SELECT'];
-      return inputTags.includes(elTag);
-    };
+  test('Input detection correctly suppresses shortcut triggers when typing in real panel helper', () => {
+    const { shouldSuppressAcademicShortcut } = require('../injected/ui/panel');
 
-    assert.equal(shouldSuppress('INPUT', false), true);
-    assert.equal(shouldSuppress('TEXTAREA', false), true);
-    assert.equal(shouldSuppress('DIV', false), false);
-    assert.equal(shouldSuppress('BODY', false), false);
-    assert.equal(shouldSuppress('BODY', true), true); // Ctrl/Alt pressed
+    assert.equal(shouldSuppressAcademicShortcut({ tagName: 'INPUT' }), true);
+    assert.equal(shouldSuppressAcademicShortcut({ tagName: 'TEXTAREA' }), true);
+    assert.equal(shouldSuppressAcademicShortcut({ tagName: 'SELECT' }), true);
+    assert.equal(
+      shouldSuppressAcademicShortcut({
+        tagName: 'DIV',
+        getAttribute: (attr: string) => (attr === 'role' ? 'textbox' : null)
+      }),
+      true
+    );
+    assert.equal(
+      shouldSuppressAcademicShortcut({
+        tagName: 'DIV',
+        getAttribute: (attr: string) => (attr === 'contenteditable' ? 'true' : null)
+      }),
+      true
+    );
+    assert.equal(
+      shouldSuppressAcademicShortcut({
+        tagName: 'DIV',
+        getAttribute: () => null,
+        closest: () => null
+      }),
+      false
+    );
   });
 });
 

@@ -1,4 +1,4 @@
-import { AcademicEventPayload, EventType } from './types';
+import { AcademicEventPayload } from './types';
 
 export interface ValidationResult {
   valid: boolean;
@@ -95,11 +95,69 @@ export function assertValidAcademicPayload(payload: unknown): asserts payload is
 }
 
 /**
- * Validates Google Calendar eventId parameter for deletion.
+ * Validates Google Calendar eventId parameter for deletion and updates.
+ * Supports standard base64 hashes, compound recurrence IDs, domain names, and encoded characters.
  */
 export function isValidEventId(eventId: unknown): eventId is string {
   if (typeof eventId !== 'string') return false;
   const trimmed = eventId.trim();
-  // Google Calendar event IDs are alphanumeric / base64 encoded strings (which may contain +, /, =, _, -, or single space for compound IDs)
-  return trimmed.length >= 4 && trimmed.length <= 512 && /^[a-zA-Z0-9_=+\/-]+( [a-zA-Z0-9_=+\/-]+)?$/.test(trimmed);
+  return (
+    trimmed.length >= 2 &&
+    trimmed.length <= 1024 &&
+    /^[a-zA-Z0-9_=+\/@.:%-]+( [a-zA-Z0-9_=+\/@.:%-]+)?$/.test(trimmed)
+  );
+}
+
+/**
+ * Verifies that an IPC sender URL strictly belongs to the HTTPS Google Calendar origin.
+ */
+export function isTrustedCalendarOrigin(urlStr: unknown): boolean {
+  if (typeof urlStr !== 'string' || !urlStr) return false;
+  try {
+    const parsed = new URL(urlStr);
+    return parsed.protocol === 'https:' && parsed.hostname === 'calendar.google.com';
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Validates whether a hostname belongs to an official Google auth/calendar domain.
+ * Requires exact match or leading-dot subdomain boundary (rejects evilgoogle.com and googleusercontent.com).
+ */
+export function isAllowedGoogleHost(hostname: unknown): boolean {
+  if (typeof hostname !== 'string' || !hostname) return false;
+  const clean = hostname.trim().toLowerCase();
+  const allowedRoots = ['google.com', 'googleapis.com', 'gstatic.com'];
+  return allowedRoots.some((root) => clean === root || clean.endsWith('.' + root));
+}
+
+/**
+ * Ensures only safe web protocols (http/https) are forwarded to shell.openExternal.
+ */
+export function isSafeExternalUrl(urlStr: unknown): boolean {
+  if (typeof urlStr !== 'string' || !urlStr) return false;
+  try {
+    const parsed = new URL(urlStr);
+    return parsed.protocol === 'https:' || parsed.protocol === 'http:';
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Validates and sanitizes an optional list of secondary academic calendar names.
+ */
+export function validateCalendarNames(names: unknown): string[] {
+  const defaults = ['Exámenes', 'Entregas'];
+  if (!Array.isArray(names) || names.length === 0) {
+    return defaults;
+  }
+  const sanitized = names
+    .filter((item): item is string => typeof item === 'string')
+    .map((item) => item.replace(/[\u0000-\u001F\u007F]/g, '').trim())
+    .filter((item) => item.length > 0 && item.length <= 80)
+    .slice(0, 15);
+
+  return sanitized.length > 0 ? Array.from(new Set(sanitized)) : defaults;
 }

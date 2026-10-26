@@ -1,7 +1,6 @@
 import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
 import { AcademicEventPayload } from '../shared/types';
-import { TARGET_CALENDARS } from '../shared/constants';
 import { formatAcademicEventUrl } from '../shared/formatters';
 import { setLocale } from '../shared/i18n';
 
@@ -520,7 +519,112 @@ describe('6. Academic Event Extended View (Detail Modal)', () => {
   });
 });
 
+describe('24. Full Editor Navigation & Return Controller', () => {
+  const { FullEditorNavigation } = require('../injected/ui/fullEditorNavigation');
 
+  test('isFullEditorActive accurately detects Google Calendar eventedit routes', () => {
+    const nav = FullEditorNavigation.getInstance();
 
+    (global as any).window = {
+      location: { pathname: '/calendar/u/0/r/eventedit/abc12345' }
+    };
+    assert.equal(nav.isFullEditorActive(), true);
 
+    (global as any).window = {
+      location: { pathname: '/calendar/u/0/r' }
+    };
+    assert.equal(nav.isFullEditorActive(), false);
+
+    (global as any).window = {
+      location: { pathname: '/calendar/u/0/r/month' }
+    };
+    assert.equal(nav.isFullEditorActive(), false);
+  });
+
+  test('isCloseButtonTarget accurately detects Google native discard triggers and top-left header geometry', () => {
+    const nav = FullEditorNavigation.getInstance();
+
+    // 1. Explicit ID
+    const target1 = {
+      closest: (sel: string) => (sel.includes('#xPrCloseBu') ? {} : null),
+      getAttribute: () => null,
+      getBoundingClientRect: () => ({ top: 100, left: 100, width: 30, height: 30 })
+    } as any;
+    assert.equal(nav.isCloseButtonTarget(target1), true);
+
+    // 2. Semantic ARIA
+    const target2 = {
+      closest: (sel: string) => (sel.includes('[aria-label]') ? target2 : null),
+      getAttribute: (attr: string) => (attr === 'aria-label' ? 'Descartar cambios' : null),
+      getBoundingClientRect: () => ({ top: 100, left: 100, width: 30, height: 30 })
+    } as any;
+    assert.equal(nav.isCloseButtonTarget(target2), true);
+
+    // 3. Top-left geometry heuristic (Google native position)
+    const target3 = {
+      closest: (sel: string) => (sel.includes('button') ? target3 : null),
+      getAttribute: () => null,
+      getBoundingClientRect: () => ({ top: 12, left: 16, width: 40, height: 40 })
+    } as any;
+    assert.equal(nav.isCloseButtonTarget(target3), true);
+
+    // 4. Unrelated button
+    const target4 = {
+      closest: (sel: string) => (sel.includes('button') ? target4 : null),
+      getAttribute: () => null,
+      getBoundingClientRect: () => ({ top: 12, left: 300, width: 120, height: 40 })
+    } as any;
+    assert.equal(nav.isCloseButtonTarget(target4), false);
+  });
+
+  test('setupNativeCloseButton mounts authentic fallback ✕ button when native button is not yet rendered', () => {
+    let appendedEl: any = null;
+    let navigatedUrl = '';
+
+    (global as any).window = {
+      location: {
+        pathname: '/calendar/u/0/r/eventedit/evt_456',
+        set href(val: string) { navigatedUrl = val; },
+        get href() { return navigatedUrl; }
+      },
+      history: {
+        length: 1,
+        back: () => {}
+      },
+      addEventListener: () => {},
+      removeEventListener: () => {}
+    };
+
+    (global as any).document = {
+      getElementById: (id: string) => (appendedEl && appendedEl.id === id ? appendedEl : null),
+      querySelectorAll: () => [],
+      querySelector: () => null,
+      createElement: () => ({
+        id: '',
+        type: '',
+        style: { cssText: '' },
+        innerHTML: '',
+        setAttribute: () => {},
+        addEventListener: (event: string, handler: Function) => {
+          if (event === 'click') {
+            handler({ preventDefault: () => {} });
+          }
+        },
+        remove: () => { appendedEl = null; }
+      }),
+      head: { appendChild: () => {} },
+      body: {
+        appendChild: (el: any) => { appendedEl = el; }
+      }
+    };
+
+    const nav = FullEditorNavigation.getInstance();
+    nav.setupNativeCloseButton();
+
+    assert.ok(appendedEl, 'Fallback ✕ button should be mounted');
+    assert.equal(appendedEl.id, 'gcal-native-close-btn');
+    assert.ok(navigatedUrl.includes('/calendar/u/0/r'), 'Clicking fallback ✕ button should return to calendar');
+    nav.destroy();
+  });
+});
 

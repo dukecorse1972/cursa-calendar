@@ -1,4 +1,7 @@
 const fs = require('fs');
+const path = require('path');
+const outDir = path.resolve(__dirname, '..', '..', 'artifacts', 'debug-screenshots');
+fs.mkdirSync(outDir, { recursive: true });
 
 async function main() {
   const res = await fetch('http://127.0.0.1:9222/json');
@@ -28,7 +31,7 @@ async function main() {
     // Verify Tab 1: CLASES (default on load)
     console.log('2. Verifying CLASES tab (initial state)...');
     const ssClases = await send('Page.captureScreenshot', { format: 'png' });
-    fs.writeFileSync('C:/Users/dario/Downloads/VERIFIED_TAB_CLASES.png', Buffer.from(ssClases.data, 'base64'));
+    fs.writeFileSync(path.join(outDir, 'VERIFIED_TAB_CLASES.png'), Buffer.from(ssClases.data, 'base64'));
     console.log('Saved VERIFIED_TAB_CLASES.png');
 
     // Click Tab 2: EXÁMENES Y ENTREGAS
@@ -43,7 +46,7 @@ async function main() {
     await new Promise(r => setTimeout(r, 1200));
 
     const ssEntregas = await send('Page.captureScreenshot', { format: 'png' });
-    fs.writeFileSync('C:/Users/dario/Downloads/VERIFIED_TAB_ENTREGAS.png', Buffer.from(ssEntregas.data, 'base64'));
+    fs.writeFileSync(path.join(outDir, 'VERIFIED_TAB_ENTREGAS.png'), Buffer.from(ssEntregas.data, 'base64'));
     console.log('Saved VERIFIED_TAB_ENTREGAS.png');
 
     // Click Tab 3: TODO
@@ -58,7 +61,7 @@ async function main() {
     await new Promise(r => setTimeout(r, 1200));
 
     const ssTodo = await send('Page.captureScreenshot', { format: 'png' });
-    fs.writeFileSync('C:/Users/dario/Downloads/VERIFIED_TAB_TODO.png', Buffer.from(ssTodo.data, 'base64'));
+    fs.writeFileSync(path.join(outDir, 'VERIFIED_TAB_TODO.png'), Buffer.from(ssTodo.data, 'base64'));
     console.log('Saved VERIFIED_TAB_TODO.png');
 
     // Return back to CLASES
@@ -73,7 +76,7 @@ async function main() {
     await new Promise(r => setTimeout(r, 1200));
 
     const ssFinal = await send('Page.captureScreenshot', { format: 'png' });
-    fs.writeFileSync('C:/Users/dario/Downloads/VERIFIED_FINAL_CLASES.png', Buffer.from(ssFinal.data, 'base64'));
+    fs.writeFileSync(path.join(outDir, 'VERIFIED_FINAL_CLASES.png'), Buffer.from(ssFinal.data, 'base64'));
     console.log('Saved VERIFIED_FINAL_CLASES.png');
 
     process.exit(0);

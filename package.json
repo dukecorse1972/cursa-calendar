@@ -1,15 +1,17 @@
 {
   "name": "cursa-desktop",
   "productName": "Cursa",
-  "version": "1.1.0",
+  "version": "1.1.2",
   "description": "Desktop companion and academic productivity workstation for Google Calendar on Windows",
   "main": "dist/main/index.js",
   "scripts": {
+    "lint": "eslint src",
+    "lint:fix": "eslint src --fix",
     "build:ts": "tsc",
     "build:preload": "esbuild src/preload/index.ts --bundle --platform=node --external:electron --outfile=dist/preload/bundle.js",
     "build": "tsc && npm run build:preload",
     "watch": "tsc -w",
-    "test": "npm run build && node --test dist/tests/core.test.js dist/tests/adapter.test.js dist/tests/validators.test.js dist/tests/selectors.test.js dist/tests/logger.test.js dist/tests/onboarding-palettes.test.js dist/tests/generalization-audit.test.js dist/tests/grades.test.js",
+    "test": "npm run build && node --test dist/tests/core.test.js dist/tests/adapter.test.js dist/tests/validators.test.js dist/tests/selectors.test.js dist/tests/logger.test.js dist/tests/onboarding-palettes.test.js dist/tests/generalization-audit.test.js dist/tests/grades.test.js dist/tests/gcal-automation.test.js",
     "test:auth": "npm run build && electron src/tests/auth-flow.integration.js",
     "start": "npm run build && electron .",
     "dev": "npm run build && electron .",
@@ -24,8 +26,12 @@
       "output": "release"
     },
     "files": [
-      "dist/**/*",
-      "assets/**/*",
+      "dist/main/**/*",
+      "dist/shared/**/*",
+      "dist/preload/bundle.js",
+      "!dist/**/*.map",
+      "assets/icon.ico",
+      "assets/icon.png",
       "package.json"
     ],
     "win": {
@@ -74,9 +80,12 @@
   "license": "MIT",
   "devDependencies": {
     "@types/node": "^22.10.1",
-    "electron": "^33.4.11",
+    "@typescript-eslint/eslint-plugin": "^8.72.0",
+    "@typescript-eslint/parser": "^8.72.0",
+    "electron": "^44.9.3",
     "electron-builder": "^26.15.3",
     "esbuild": "^0.28.2",
+    "eslint": "^9.39.5",
     "typescript": "^5.7.2"
   }
 }

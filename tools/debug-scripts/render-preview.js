@@ -16,10 +16,13 @@ app.whenReady().then(async () => {
   await win.loadFile(htmlPath);
   await new Promise(r => setTimeout(r, 800));
 
+  const outDir = path.resolve(__dirname, '..', '..', 'artifacts', 'debug-screenshots');
+  fs.mkdirSync(outDir, { recursive: true });
+
   const mockups = [
-    { id: 'mockup-a', file: 'C:/Users/dario/Downloads/ENFOQUE_A_BENTO.png' },
-    { id: 'mockup-b', file: 'C:/Users/dario/Downloads/ENFOQUE_B_STUDIO.png' },
-    { id: 'mockup-c', file: 'C:/Users/dario/Downloads/ENFOQUE_C_TIMELINE.png' },
+    { id: 'mockup-a', file: path.join(outDir, 'ENFOQUE_A_BENTO.png') },
+    { id: 'mockup-b', file: path.join(outDir, 'ENFOQUE_B_STUDIO.png') },
+    { id: 'mockup-c', file: path.join(outDir, 'ENFOQUE_C_TIMELINE.png') },
   ];
 
   for (const m of mockups) {

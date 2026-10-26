@@ -15,7 +15,7 @@ export function getLocale(): Locale {
   return explicitLocale || getActiveLocale();
 }
 
-export function getActiveLocale(): Locale {
+function getActiveLocale(): Locale {
   if (explicitLocale) return explicitLocale;
   // If running in pure Node.js runtime (unit tests or background workers), default deterministically to 'es'
   if (typeof process !== 'undefined' && process.versions?.node && !process.versions?.electron) {

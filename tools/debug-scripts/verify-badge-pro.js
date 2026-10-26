@@ -139,9 +139,12 @@ async function main() {
   console.log('Chips structure:', JSON.stringify(inspectRes.result.value, null, 2));
 
   // Capture screenshot
+  const outDir = path.resolve(__dirname, '..', '..', 'artifacts', 'debug-screenshots');
+  fs.mkdirSync(outDir, { recursive: true });
+  const outPath = path.join(outDir, 'VERIFIED_BADGE_PRO.png');
   const shot = await send('Page.captureScreenshot', { format: 'png' });
-  fs.writeFileSync('C:/Users/dario/Downloads/VERIFIED_BADGE_PRO.png', Buffer.from(shot.data, 'base64'));
-  console.log('Saved verification screenshot to C:/Users/dario/Downloads/VERIFIED_BADGE_PRO.png');
+  fs.writeFileSync(outPath, Buffer.from(shot.data, 'base64'));
+  console.log('Saved verification screenshot to', outPath);
 
   ws.close();
   child.kill();

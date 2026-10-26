@@ -101,9 +101,10 @@ async function main() {
   console.log('Chip details in Week 3:', JSON.stringify(chipDetails.result.value, null, 2));
 
   const shot = await send('Page.captureScreenshot', { format: 'png' });
-  const outPath = 'C:/Users/dario/.gemini/antigravity-cli/brain/6544cf7f-1dfe-40fe-a167-e62c0b3da130/VERIFIED_DYNAMIC_COLOR.png';
+  const outDir = path.resolve(__dirname, '..', '..', 'artifacts', 'debug-screenshots');
+  fs.mkdirSync(outDir, { recursive: true });
+  const outPath = path.join(outDir, 'VERIFIED_DYNAMIC_COLOR.png');
   fs.writeFileSync(outPath, Buffer.from(shot.data, 'base64'));
-  fs.writeFileSync('C:/Users/dario/Downloads/VERIFIED_DYNAMIC_COLOR.png', Buffer.from(shot.data, 'base64'));
   console.log('Saved screenshot to:', outPath);
 
   ws.close();

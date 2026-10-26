@@ -1,4 +1,7 @@
 const fs = require('fs');
+const path = require('path');
+const outDir = path.resolve(__dirname, '..', '..', 'artifacts', 'debug-screenshots');
+fs.mkdirSync(outDir, { recursive: true });
 
 async function main() {
   const res = await fetch('http://127.0.0.1:9222/json');
@@ -75,8 +78,9 @@ async function main() {
       }, 1000);
     } else if (data.id === 3) {
       const buffer = Buffer.from(data.result.data, 'base64');
-      fs.writeFileSync('C:/Users/dario/Downloads/GRADES_LIVE_VIEW.png', buffer);
-      console.log('Saved top screenshot to C:/Users/dario/Downloads/GRADES_LIVE_VIEW.png');
+      const topOutPath = path.join(outDir, 'GRADES_LIVE_VIEW.png');
+      fs.writeFileSync(topOutPath, buffer);
+      console.log('Saved top screenshot to', topOutPath);
 
       // Step 4: Scroll down to view the rest of the tables
       ws.send(
@@ -109,8 +113,9 @@ async function main() {
       }, 500);
     } else if (data.id === 5) {
       const buffer = Buffer.from(data.result.data, 'base64');
-      fs.writeFileSync('C:/Users/dario/Downloads/GRADES_LIVE_VIEW_SCROLLED.png', buffer);
-      console.log('Saved scrolled screenshot to C:/Users/dario/Downloads/GRADES_LIVE_VIEW_SCROLLED.png');
+      const scrolledOutPath = path.join(outDir, 'GRADES_LIVE_VIEW_SCROLLED.png');
+      fs.writeFileSync(scrolledOutPath, buffer);
+      console.log('Saved scrolled screenshot to', scrolledOutPath);
       process.exit(0);
     }
   };

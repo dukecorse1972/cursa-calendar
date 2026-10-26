@@ -1,4 +1,5 @@
 const fs = require('fs');
+const path = require('path');
 
 async function main() {
   const res = await fetch('http://127.0.0.1:9222/json');
@@ -20,8 +21,11 @@ async function main() {
     const data = JSON.parse(event.data);
     if (data.id === 1) {
       const buffer = Buffer.from(data.result.data, 'base64');
-      fs.writeFileSync('C:/Users/dario/Downloads/VERIFIED_VIEW.png', buffer);
-      console.log('Screenshot saved to C:/Users/dario/Downloads/VERIFIED_VIEW.png');
+      const outDir = path.resolve(__dirname, '..', '..', 'artifacts', 'debug-screenshots');
+      fs.mkdirSync(outDir, { recursive: true });
+      const outPath = path.join(outDir, 'VERIFIED_VIEW.png');
+      fs.writeFileSync(outPath, buffer);
+      console.log('Screenshot saved to', outPath);
       process.exit(0);
     }
   };

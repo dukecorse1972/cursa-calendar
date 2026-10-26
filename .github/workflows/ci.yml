@@ -29,6 +29,9 @@ jobs:
       - name: Install Project Dependencies
         run: npm ci
 
+      - name: Static Code Analysis (Lint)
+        run: npm run lint
+
       - name: Compile TypeScript & Bundles
         run: npm run build
 

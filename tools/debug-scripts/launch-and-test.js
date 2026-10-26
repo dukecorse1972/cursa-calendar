@@ -72,7 +72,10 @@ async function main() {
     return res.result?.value;
   }
 
-  async function takeScreenshot(filePath) {
+  async function takeScreenshot(fileName) {
+    const outDir = path.resolve(__dirname, '..', '..', 'artifacts', 'debug-screenshots');
+    fs.mkdirSync(outDir, { recursive: true });
+    const filePath = path.join(outDir, fileName);
     const res = await send('Page.captureScreenshot', { format: 'png' });
     fs.writeFileSync(filePath, Buffer.from(res.data, 'base64'));
     console.log(`Saved screenshot to ${filePath}`);
@@ -94,7 +97,7 @@ async function main() {
     };
   })()`);
   console.log('Tabs info:', JSON.stringify(tabsInfo, null, 2));
-  await takeScreenshot('C:/Users/dario/Downloads/TEST_NEW_TABS.png');
+  await takeScreenshot('TEST_NEW_TABS.png');
 
   // TEST 2: Test Week Navigation with ArrowLeft / ArrowRight
   console.log('\n--- TEST 2: Week Navigation with Keys ---');
@@ -107,7 +110,7 @@ async function main() {
   await new Promise(r => setTimeout(r, 1000));
   const navTestAfter = await evaluate(`document.title`);
   console.log('Nav week test: before="' + navTest.titleBefore + '", after ArrowRight="' + navTestAfter + '"');
-  await takeScreenshot('C:/Users/dario/Downloads/TEST_KEY_NAV_NEXT.png');
+  await takeScreenshot('TEST_KEY_NAV_NEXT.png');
 
   // Dispatch ArrowLeft to go back
   await evaluate(`window.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowLeft', bubbles: true, cancelable: true }))`);
@@ -130,7 +133,7 @@ async function main() {
   console.log('Switch duration:', switchStats.durationMs, 'ms');
   // Wait 300ms for fluid CSS animation
   await new Promise(r => setTimeout(r, 350));
-  await takeScreenshot('C:/Users/dario/Downloads/TEST_ENTREGAS_FLUID.png');
+  await takeScreenshot('TEST_ENTREGAS_FLUID.png');
 
   // TEST 4: Clicking "+ Crear" button in EXÁMENES Y ENTREGAS (should open custom modal!)
   console.log('\n--- TEST 4: Clicking "+ Crear" in EXÁMENES Y ENTREGAS ---');
@@ -145,7 +148,7 @@ async function main() {
     };
   })()`);
   console.log('Modal test in EXÁMENES:', JSON.stringify(modalTest, null, 2));
-  await takeScreenshot('C:/Users/dario/Downloads/TEST_CREAR_MODAL_OPEN.png');
+  await takeScreenshot('TEST_CREAR_MODAL_OPEN.png');
 
   // Close modal
   await evaluate(`(() => {
@@ -171,7 +174,7 @@ async function main() {
     };
   })()`);
   console.log('Crear in CLASES test:', JSON.stringify(clasesCrearTest, null, 2));
-  await takeScreenshot('C:/Users/dario/Downloads/TEST_CLASES_NATIVE_MENU.png');
+  await takeScreenshot('TEST_CLASES_NATIVE_MENU.png');
 
   // Dismiss native menu
   await evaluate(`document.body.click()`);

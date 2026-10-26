@@ -1,5 +1,4 @@
 import { AcademicEventPayload, EventType } from '../../shared/types';
-import { TARGET_CALENDARS } from '../../shared/constants';
 import { AppState } from '../state';
 import { GoogleCalendarAdapter } from '../adapter/GoogleCalendarAdapter';
 import { OnboardingModal } from './onboardingModal';
@@ -14,6 +13,7 @@ export class CreatorModal {
   private selectedType: EventType = 'EXAMEN';
   private selectedSubject: string = '';
   private focusTrapCleanup: (() => void) | null = null;
+  private keydownHandler: ((e: KeyboardEvent) => void) | null = null;
 
   // Calendar State
   private viewDate: Date = new Date();
@@ -299,7 +299,7 @@ export class CreatorModal {
                   appearance: none;
                   -webkit-appearance: none;
                 ">
-                  ${detectedClasses.map((c) => `<option value="${c}">${c}</option>`).join('')}
+                  ${detectedClasses.map((c) => `<option value="${escapeHtml(c)}">${escapeHtml(c)}</option>`).join('')}
                 </select>
                 <div style="
                   position: absolute;
@@ -809,11 +809,15 @@ export class CreatorModal {
     });
 
     // Close on Escape key
-    window.addEventListener('keydown', (e) => {
+    if (this.keydownHandler) {
+      window.removeEventListener('keydown', this.keydownHandler);
+    }
+    this.keydownHandler = (e: KeyboardEvent) => {
       if (e.key === 'Escape' && this.modalOverlay && this.modalOverlay.style.display !== 'none') {
         this.close();
       }
-    });
+    };
+    window.addEventListener('keydown', this.keydownHandler);
 
     closeBtn?.addEventListener('click', () => this.close());
     cancelBtn?.addEventListener('click', () => this.close());
@@ -1011,16 +1015,24 @@ export class CreatorModal {
         time: startTime
       };
 
-      if (description) {
+      try {
+        const meta = JSON.parse(getIsolatedItem('gcal_academic_meta') || '{}');
+        const cleanKey = title.toLowerCase().trim();
+        const fullKey = `${cleanKey}_${subject.toLowerCase().trim()}`;
+        let termKey = '';
         try {
-          const meta = JSON.parse(getIsolatedItem('gcal_academic_meta') || '{}');
-          const cleanKey = title.toLowerCase().trim();
-          const fullKey = `${cleanKey}_${subject.toLowerCase().trim()}`;
-          meta[cleanKey] = { description, subject, type: this.selectedType };
-          meta[fullKey] = { description, subject, type: this.selectedType };
-          setIsolatedItem('gcal_academic_meta', JSON.stringify(meta));
+          const rawPlan = getIsolatedItem('gcal_academic_plan');
+          if (rawPlan) {
+            const p = JSON.parse(rawPlan);
+            if (p && p.currentYear && p.currentPeriod) {
+              termKey = `Y${p.currentYear}-P${p.currentPeriod}`;
+            }
+          }
         } catch (_) {}
-      }
+        meta[cleanKey] = { ...(meta[cleanKey] || {}), description, subject, type: this.selectedType, termKey };
+        meta[fullKey] = { ...(meta[fullKey] || {}), description, subject, type: this.selectedType, termKey };
+        setIsolatedItem('gcal_academic_meta', JSON.stringify(meta));
+      } catch (_) {}
 
       const adapter = GoogleCalendarAdapter.getInstance();
       const ok = await adapter.createAcademicEvent(payload);
@@ -1030,18 +1042,24 @@ export class CreatorModal {
         return;
       }
 
-      // Guarantee tab remains ENTREGAS_EXAMENES
+      // Guarantee tab remains ENTREGAS_EXAMENES across reload/navigation
       appState.setActiveTab('ENTREGAS_EXAMENES');
       adapter.applyTabFilter('ENTREGAS_EXAMENES', true);
 
-      // Show confirmation toast
+      // Show confirmation toast and persist across cloud-sync navigation
       const destCalName = this.selectedType === 'EXAMEN' ? '📋 Exámenes' : '🗓️ Entregas';
-      this.showToast(`✓ Evento guardado correctamente en ${destCalName}`);
+      const toastMsg = `✓ Evento guardado correctamente en ${destCalName}`;
+      this.showToast(toastMsg);
 
       titleInput.value = '';
       descInput.value = '';
       this.close();
-    } catch (err) {
+
+      // Reload/navigate calendar grid onto the created event's date so Google Calendar fetches the cloud event immediately
+      setTimeout(() => {
+        adapter.navigateToEventDate(date, toastMsg);
+      }, 450);
+    } catch (_err) {
       this.showError('Error al crear el evento en Google Calendar.');
     } finally {
       appState.setSubmitting(false);
@@ -1103,6 +1121,14 @@ export class CreatorModal {
   }
 
   public destroy(): void {
+    if (this.keydownHandler) {
+      window.removeEventListener('keydown', this.keydownHandler);
+      this.keydownHandler = null;
+    }
+    if (this.focusTrapCleanup) {
+      this.focusTrapCleanup();
+      this.focusTrapCleanup = null;
+    }
     if (this.modalOverlay && this.modalOverlay.parentNode) {
       this.modalOverlay.parentNode.removeChild(this.modalOverlay);
       this.modalOverlay = null;

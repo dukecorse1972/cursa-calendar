@@ -1,5 +1,5 @@
 import { safeSetInnerHTML, escapeHtml } from '../../utils/dom';
-import { SubjectGradesConfig, GradeItem, GradeItemType } from '../../../shared/gradesTypes';
+import { SubjectGradesConfig, GradeItemType } from '../../../shared/gradesTypes';
 import { getSubjectGrades, saveSubjectGrades, deleteSubjectGrades, createInitialSubjectGrades } from '../../services/gradesStorage';
 import {
   calculateAccumulatedScore,
@@ -13,6 +13,8 @@ import {
 import { GoogleCalendarAdapter } from '../../adapter/GoogleCalendarAdapter';
 import { GradesChatModal } from './gradesChatModal';
 import { CalendarPickerMode } from './calendarPickerMode';
+import { getAcademicPlan, formatPeriodLabel, isTermCompleted } from '../../services/academicPlanService';
+import { OnboardingModal } from '../onboardingModal';
 
 export class GradesSimulatorView {
   private static instance: GradesSimulatorView | null = null;
@@ -35,8 +37,14 @@ export class GradesSimulatorView {
   public mount(parent: HTMLElement): void {
     this.containerEl = parent;
     const detectedClasses = GoogleCalendarAdapter.getInstance().getDetectedClasses();
+    if (detectedClasses.length === 0) {
+      this.activeSubject = '';
+      this.currentConfig = null;
+      this.render();
+      return;
+    }
     if (!this.activeSubject || !detectedClasses.includes(this.activeSubject)) {
-      this.activeSubject = detectedClasses[0] || 'Asignatura 1';
+      this.activeSubject = detectedClasses[0];
     }
     this.loadSubject(this.activeSubject);
   }
@@ -62,6 +70,9 @@ export class GradesSimulatorView {
     const detectedClasses = GoogleCalendarAdapter.getInstance().getDetectedClasses();
     const adapter = GoogleCalendarAdapter.getInstance();
     const colorMap = adapter.getSubjectColorMap();
+    const activePlan = getAcademicPlan();
+    const activePeriodLabel = formatPeriodLabel(activePlan, activePlan.currentYear, activePlan.currentPeriod, false);
+    const activeTermDone = isTermCompleted(activePlan.currentYear, activePlan.currentPeriod);
 
     safeSetInnerHTML(
       this.containerEl,
@@ -94,6 +105,28 @@ export class GradesSimulatorView {
           scrollbar-width: none !important;
           -ms-overflow-style: none !important;
         ">
+          <button type="button" id="cursa-grades-open-plan-btn" title="Cambiar de cuatrimestre o exportar copia portátil (.cursa.json)" style="
+            height: 36px;
+            padding: 0 14px;
+            border-radius: 18px;
+            border: 1.5px solid ${activeTermDone ? '#34a853' : 'var(--gcal-accent, #8ab4f8)'};
+            background: ${activeTermDone ? 'rgba(52, 168, 83, 0.14)' : 'rgba(138, 180, 248, 0.12)'};
+            color: ${activeTermDone ? '#34a853' : 'var(--gcal-accent, #8ab4f8)'};
+            font-family: 'Google Sans', Roboto, sans-serif;
+            font-weight: 700;
+            font-size: 12.5px;
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            white-space: nowrap;
+            flex-shrink: 0;
+            transition: all 0.15s ease;
+          ">
+            <span>🎓</span>
+            <span>${escapeHtml(activePeriodLabel)}${activeTermDone ? ' ✓' : ''}</span>
+            <span style="font-size: 10px; opacity: 0.8;">▾</span>
+          </button>
           ${detectedClasses
             .map((subj) => {
               const isActive = subj === this.activeSubject;
@@ -145,12 +178,58 @@ export class GradesSimulatorView {
             .join('')}
         </div>
 
-        ${!this.currentConfig ? this.renderEmptyState() : this.renderSimulatorContent()}
+        ${detectedClasses.length === 0
+          ? this.renderNoSubjectsInTermState(activePeriodLabel)
+          : !this.currentConfig
+            ? this.renderEmptyState()
+            : this.renderSimulatorContent()}
       </div>
     `
     );
 
     this.attachEvents();
+  }
+
+  private renderNoSubjectsInTermState(activePeriodLabel: string): string {
+    return `
+      <div style="
+        flex: 1;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        text-align: center;
+        padding: 64px 32px;
+        background: var(--gcal-surface, #282a2d);
+        border: 1px solid var(--gcal-border, #444746);
+        border-radius: 24px;
+        margin-top: 12px;
+        box-shadow: 0 2px 8px rgba(0,0,0,0.2);
+        gap: 14px;
+      ">
+        <div style="font-size: 40px;">🎓</div>
+        <h3 style="margin: 0; font-size: 20px; font-weight: 700; color: var(--gcal-text, #e8eaed);">
+          Sin asignaturas en ${escapeHtml(activePeriodLabel)}
+        </h3>
+        <p style="margin: 0; font-size: 14px; color: var(--gcal-secondary-text, #9aa0a6); max-width: 480px; line-height: 1.5;">
+          Este periodo aún no tiene asignaturas configuradas. Tus asignaturas y calificaciones de otros cuatrimestres están guardadas de forma segura.
+        </p>
+        <button type="button" id="cursa-grades-empty-term-config-btn" style="
+          margin-top: 6px;
+          padding: 10px 22px;
+          border-radius: 20px;
+          border: none;
+          background: var(--gcal-accent, #1a73e8);
+          color: #ffffff;
+          font-size: 13.5px;
+          font-weight: 600;
+          cursor: pointer;
+          box-shadow: 0 2px 8px rgba(26, 115, 232, 0.35);
+        ">
+          ⚙️ Configurar Asignaturas de ${escapeHtml(activePeriodLabel)}
+        </button>
+      </div>
+    `;
   }
 
   private renderEmptyState(): string {
@@ -245,27 +324,12 @@ export class GradesSimulatorView {
     `;
   }
 
-  private renderSimulatorContent(): string {
-    if (!this.currentConfig) return '';
-
-    const config = this.currentConfig;
-    const adapter = GoogleCalendarAdapter.getInstance();
-    const colorMap = adapter.getSubjectColorMap();
-    const subjColor = adapter.findSubjectColor(this.activeSubject, colorMap);
-
-    const { accumulatedPoints, gradedWeight, totalWeight } = calculateAccumulatedScore(config.items);
-    const isSum100 = totalWeight === 100;
-    const targetCalc = calculateTargetRequiredGrade(config.items, this.currentTarget, config.minFinalGradeRequired);
-    const simResult = calculateSimulatedFinalGrade(config.items, this.simulatedScore, config.minFinalGradeRequired, config.blockCutoffs);
-
-    // Dynamic grouping into Generalist Material 3 Outliner Blocks (Estructura 6)
-    const groups = groupGradeItems(config.items, config.blockCutoffs);
-    if (this.expandedGroups.size === 0 && groups.length > 0) {
-      groups.forEach((g) => this.expandedGroups.add(g.id));
-    }
-    const allExpanded = groups.length > 0 && groups.every((g) => this.expandedGroups.has(g.id));
-
-    // Color logic for target calculation card
+private getTargetStatusColors(targetCalc: ReturnType<typeof calculateTargetRequiredGrade>): {
+    targetStatusColor: string;
+    targetStatusBg: string;
+    targetStatusBorder: string;
+    targetStatusLabel: string;
+  } {
     let targetStatusColor = '#81c995';
     let targetStatusBg = 'rgba(129, 201, 149, 0.15)';
     let targetStatusBorder = 'rgba(129, 201, 149, 0.3)';
@@ -286,8 +350,15 @@ export class GradesSimulatorView {
       targetStatusBorder = 'rgba(138, 180, 248, 0.3)';
       targetStatusLabel = 'Exigente (6.5 - 8.5)';
     }
+    return { targetStatusColor, targetStatusBg, targetStatusBorder, targetStatusLabel };
+  }
 
-    // Color logic for simulated score card
+  private getSimStatusColors(simResult: ReturnType<typeof calculateSimulatedFinalGrade>): {
+    simStatusColor: string;
+    simStatusBg: string;
+    simStatusBorder: string;
+    simStatusLabel: string;
+  } {
     let simStatusColor = '#81c995';
     let simStatusBg = 'rgba(129, 201, 149, 0.15)';
     let simStatusBorder = 'rgba(129, 201, 149, 0.3)';
@@ -320,7 +391,15 @@ export class GradesSimulatorView {
       simStatusBorder = 'rgba(242, 139, 130, 0.3)';
       simStatusLabel = 'Suspenso (< 5.0)';
     }
+    return { simStatusColor, simStatusBg, simStatusBorder, simStatusLabel };
+  }
 
+  private renderSubjectHeader(
+    config: SubjectGradesConfig,
+    subjColor: string,
+    accumulatedPoints: number,
+    gradedWeight: number
+  ): string {
     return `
       <!-- Subject Header Bar (Sleek Notion/Raycast Studio Style) -->
       <div style="
@@ -461,25 +540,118 @@ export class GradesSimulatorView {
           </button>
         </div>
       </div>
+    `;
+  }
 
-      <!-- Integrated HUD Summary Strip (Progreso + Objetivo + Simulador) -->
+  private renderProgressCard(accumulatedPoints: number, gradedWeight: number): string {
+    return `
+      <!-- HUD 1: Progreso Actual y Nota Acumulada -->
       <div style="
-        display: grid;
-        grid-template-columns: repeat(3, 1fr);
-        gap: 14px;
+        background: var(--gcal-surface, #282a2d);
+        border: 1px solid var(--gcal-border, #444746);
+        border-radius: 16px;
+        padding: 16px 20px;
+        box-shadow: 0 1px 4px rgba(0,0,0,0.18);
+        display: flex;
+        flex-direction: column;
+        justify-content: space-between;
       ">
-        <!-- HUD 1: Progreso Actual y Nota Acumulada -->
-        <div style="
-          background: var(--gcal-surface, #282a2d);
-          border: 1px solid var(--gcal-border, #444746);
-          border-radius: 16px;
-          padding: 16px 20px;
-          box-shadow: 0 1px 4px rgba(0,0,0,0.18);
-          display: flex;
-          flex-direction: column;
-          justify-content: space-between;
-        ">
-          <div>
+        <div>
+          <div style="
+            font-size: 11px;
+            font-weight: 600;
+            letter-spacing: 0.8px;
+            text-transform: uppercase;
+            color: var(--gcal-secondary-text, #9aa0a6);
+            display: flex;
+            align-items: center;
+            gap: 6px;
+          ">
+            <span>📊</span> <span>Progreso Global</span>
+          </div>
+          <div style="
+            font-size: 32px;
+            font-weight: 500;
+            font-family: 'Google Sans', Roboto, sans-serif;
+            color: var(--gcal-accent, #8ab4f8);
+            line-height: 1.15;
+            margin: 6px 0 2px 0;
+          ">
+            ${accumulatedPoints.toFixed(2)}
+            <span style="font-size: 14px; font-weight: 400; color: var(--gcal-secondary-text, #9aa0a6);">/ 10 pts</span>
+          </div>
+          <div style="font-size: 12px; color: var(--gcal-secondary-text, #9aa0a6);">
+            Puntos asegurados (${gradedWeight}% evaluado)
+          </div>
+        </div>
+
+        <div style="margin-top: 12px;">
+          <div style="
+            width: 100%;
+            height: 6px;
+            background: var(--gcal-surface-hover, #35373b);
+            border-radius: 3px;
+            overflow: hidden;
+            position: relative;
+          ">
+            <div style="
+              width: ${Math.min(100, (accumulatedPoints / 10) * 100)}%;
+              height: 100%;
+              background: ${accumulatedPoints >= 5.0 ? '#81c995' : 'var(--gcal-accent, #8ab4f8)'};
+              border-radius: 3px;
+              transition: width 0.3s ease;
+            "></div>
+            <div style="
+              position: absolute;
+              left: 50%;
+              top: 0;
+              width: 2px;
+              height: 100%;
+              background: rgba(255,255,255,0.3);
+            " title="Corte de Aprobado (5.0)"></div>
+          </div>
+
+          <div style="
+            margin-top: 8px;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            font-size: 11.5px;
+          ">
+            ${
+              accumulatedPoints >= 5.0
+                ? `<span style="background: rgba(129, 201, 149, 0.15); color: #81c995; border: 1px solid rgba(129, 201, 149, 0.3); font-weight: 600; padding: 1px 8px; border-radius: 8px;">
+                    🎉 ¡Aprobado asegurado!
+                  </span>`
+                : `<span style="color: var(--gcal-secondary-text, #9aa0a6);">
+                    Faltan <strong style="color: var(--gcal-text, #e8eaed);">${(5.0 - accumulatedPoints).toFixed(2)} pts</strong> para el 5.0
+                  </span>`
+            }
+            <span style="color: var(--gcal-secondary-text, #9aa0a6); font-size: 11px;">Meta: 5.0 min</span>
+          </div>
+        </div>
+      </div>
+    `;
+  }
+
+  private renderTargetCard(
+    targetCalc: ReturnType<typeof calculateTargetRequiredGrade>,
+    targetStatus: { targetStatusColor: string; targetStatusBg: string; targetStatusBorder: string; targetStatusLabel: string }
+  ): string {
+    return `
+      <!-- HUD 2: Calculadora de Objetivo ("¿Qué necesito sacar?") -->
+      <div style="
+        background: var(--gcal-surface, #282a2d);
+        border: 1px solid var(--gcal-border, #444746);
+        border-radius: 16px;
+        padding: 16px 20px;
+        box-shadow: 0 1px 4px rgba(0,0,0,0.18);
+        display: flex;
+        flex-direction: column;
+        justify-content: space-between;
+      ">
+        <div>
+          <div style="display: flex; justify-content: space-between; align-items: center;">
             <div style="
               font-size: 11px;
               font-weight: 600;
@@ -490,248 +662,176 @@ export class GradesSimulatorView {
               align-items: center;
               gap: 6px;
             ">
-              <span>📊</span> <span>Progreso Global</span>
-            </div>
-            <div style="
-              font-size: 32px;
-              font-weight: 500;
-              font-family: 'Google Sans', Roboto, sans-serif;
-              color: var(--gcal-accent, #8ab4f8);
-              line-height: 1.15;
-              margin: 6px 0 2px 0;
-            ">
-              ${accumulatedPoints.toFixed(2)}
-              <span style="font-size: 14px; font-weight: 400; color: var(--gcal-secondary-text, #9aa0a6);">/ 10 pts</span>
-            </div>
-            <div style="font-size: 12px; color: var(--gcal-secondary-text, #9aa0a6);">
-              Puntos asegurados (${gradedWeight}% evaluado)
-            </div>
-          </div>
-
-          <div style="margin-top: 12px;">
-            <div style="
-              width: 100%;
-              height: 6px;
-              background: var(--gcal-surface-hover, #35373b);
-              border-radius: 3px;
-              overflow: hidden;
-              position: relative;
-            ">
-              <div style="
-                width: ${Math.min(100, (accumulatedPoints / 10) * 100)}%;
-                height: 100%;
-                background: ${accumulatedPoints >= 5.0 ? '#81c995' : 'var(--gcal-accent, #8ab4f8)'};
-                border-radius: 3px;
-                transition: width 0.3s ease;
-              "></div>
-              <div style="
-                position: absolute;
-                left: 50%;
-                top: 0;
-                width: 2px;
-                height: 100%;
-                background: rgba(255,255,255,0.3);
-              " title="Corte de Aprobado (5.0)"></div>
+              <span>🎯</span> <span>Objetivo de Nota</span>
             </div>
 
-            <div style="
-              margin-top: 8px;
-              display: flex;
-              align-items: center;
-              justify-content: space-between;
-              font-size: 11.5px;
-            ">
-              ${
-                accumulatedPoints >= 5.0
-                  ? `<span style="background: rgba(129, 201, 149, 0.15); color: #81c995; border: 1px solid rgba(129, 201, 149, 0.3); font-weight: 600; padding: 1px 8px; border-radius: 8px;">
-                      🎉 ¡Aprobado asegurado!
-                    </span>`
-                  : `<span style="color: var(--gcal-secondary-text, #9aa0a6);">
-                      Faltan <strong style="color: var(--gcal-text, #e8eaed);">${(5.0 - accumulatedPoints).toFixed(2)} pts</strong> para el 5.0
-                    </span>`
-              }
-              <span style="color: var(--gcal-secondary-text, #9aa0a6); font-size: 11px;">Meta: 5.0 min</span>
-            </div>
-          </div>
-        </div>
-
-        <!-- HUD 2: Calculadora de Objetivo ("¿Qué necesito sacar?") -->
-        <div style="
-          background: var(--gcal-surface, #282a2d);
-          border: 1px solid var(--gcal-border, #444746);
-          border-radius: 16px;
-          padding: 16px 20px;
-          box-shadow: 0 1px 4px rgba(0,0,0,0.18);
-          display: flex;
-          flex-direction: column;
-          justify-content: space-between;
-        ">
-          <div>
-            <div style="display: flex; justify-content: space-between; align-items: center;">
-              <div style="
-                font-size: 11px;
-                font-weight: 600;
-                letter-spacing: 0.8px;
-                text-transform: uppercase;
-                color: var(--gcal-secondary-text, #9aa0a6);
-                display: flex;
-                align-items: center;
-                gap: 6px;
-              ">
-                <span>🎯</span> <span>Objetivo de Nota</span>
-              </div>
-
-              <!-- Quick Target Pills -->
-              <div style="display: flex; gap: 5px;">
-                <button type="button" class="cursa-target-btn ${this.currentTarget === 5.0 ? 'active' : ''}" data-target="5.0" style="
-                  padding: 2px 8px;
-                  border-radius: 10px;
-                  border: 1px solid ${this.currentTarget === 5.0 ? 'var(--gcal-accent, #8ab4f8)' : 'var(--gcal-border, #444746)'};
-                  background: ${this.currentTarget === 5.0 ? 'rgba(138, 180, 248, 0.18)' : 'transparent'};
-                  color: ${this.currentTarget === 5.0 ? 'var(--gcal-accent, #8ab4f8)' : 'var(--gcal-secondary-text, #9aa0a6)'};
-                  font-weight: 600;
-                  font-size: 11px;
-                  cursor: pointer;
-                  transition: all 0.15s ease;
-                ">5.0</button>
-                <button type="button" class="cursa-target-btn ${this.currentTarget === 7.0 ? 'active' : ''}" data-target="7.0" style="
-                  padding: 2px 8px;
-                  border-radius: 10px;
-                  border: 1px solid ${this.currentTarget === 7.0 ? 'var(--gcal-accent, #8ab4f8)' : 'var(--gcal-border, #444746)'};
-                  background: ${this.currentTarget === 7.0 ? 'rgba(138, 180, 248, 0.18)' : 'transparent'};
-                  color: ${this.currentTarget === 7.0 ? 'var(--gcal-accent, #8ab4f8)' : 'var(--gcal-secondary-text, #9aa0a6)'};
-                  font-weight: 600;
-                  font-size: 11px;
-                  cursor: pointer;
-                  transition: all 0.15s ease;
-                ">7.0</button>
-                <button type="button" class="cursa-target-btn ${this.currentTarget === 9.0 ? 'active' : ''}" data-target="9.0" style="
-                  padding: 2px 8px;
-                  border-radius: 10px;
-                  border: 1px solid ${this.currentTarget === 9.0 ? 'var(--gcal-accent, #8ab4f8)' : 'var(--gcal-border, #444746)'};
-                  background: ${this.currentTarget === 9.0 ? 'rgba(138, 180, 248, 0.18)' : 'transparent'};
-                  color: ${this.currentTarget === 9.0 ? 'var(--gcal-accent, #8ab4f8)' : 'var(--gcal-secondary-text, #9aa0a6)'};
-                  font-weight: 600;
-                  font-size: 11px;
-                  cursor: pointer;
-                  transition: all 0.15s ease;
-                ">9.0</button>
-              </div>
-            </div>
-
-            <div style="
-              font-size: ${targetCalc.isPossible ? '32px' : '22px'};
-              font-weight: 500;
-              font-family: 'Google Sans', Roboto, sans-serif;
-              color: ${targetStatusColor};
-              line-height: 1.15;
-              margin: 6px 0 2px 0;
-            ">
-              ${targetCalc.isPossible ? targetCalc.requiredFinalGrade.toFixed(2) : 'Inalcanzable'}
-              ${targetCalc.isPossible ? '<span style="font-size: 13px; font-weight: 400; color: var(--gcal-secondary-text, #9aa0a6);">en pendientes</span>' : ''}
-            </div>
-
-            <div style="font-size: 12px; color: var(--gcal-secondary-text, #9aa0a6);">
-              Para obtener un <strong style="color: var(--gcal-text, #e8eaed);">${this.currentTarget.toFixed(1)}</strong> final
-            </div>
-          </div>
-
-          <div style="margin-top: 10px;">
-            <div style="display: flex; align-items: center; justify-content: space-between;">
-              <span style="
-                background: ${targetStatusBg};
-                color: ${targetStatusColor};
-                border: 1px solid ${targetStatusBorder};
-                font-weight: 600;
-                font-size: 11px;
+            <!-- Quick Target Pills -->
+            <div style="display: flex; gap: 5px;">
+              <button type="button" class="cursa-target-btn ${this.currentTarget === 5.0 ? 'active' : ''}" data-target="5.0" style="
                 padding: 2px 8px;
-                border-radius: 8px;
-                display: inline-block;
-              ">
-                ${targetStatusLabel}
-              </span>
-
-              ${
-                targetCalc.isCutoffTriggered
-                  ? `<span style="font-size: 11px; color: #fdd663; font-weight: 500;">
-                      🛡️ Corte de ${targetCalc.minCutoff?.toFixed(2)}
-                    </span>`
-                  : ''
-              }
+                border-radius: 10px;
+                border: 1px solid ${this.currentTarget === 5.0 ? 'var(--gcal-accent, #8ab4f8)' : 'var(--gcal-border, #444746)'};
+                background: ${this.currentTarget === 5.0 ? 'rgba(138, 180, 248, 0.18)' : 'transparent'};
+                color: ${this.currentTarget === 5.0 ? 'var(--gcal-accent, #8ab4f8)' : 'var(--gcal-secondary-text, #9aa0a6)'};
+                font-weight: 600;
+                font-size: 11px;
+                cursor: pointer;
+                transition: all 0.15s ease;
+              ">5.0</button>
+              <button type="button" class="cursa-target-btn ${this.currentTarget === 7.0 ? 'active' : ''}" data-target="7.0" style="
+                padding: 2px 8px;
+                border-radius: 10px;
+                border: 1px solid ${this.currentTarget === 7.0 ? 'var(--gcal-accent, #8ab4f8)' : 'var(--gcal-border, #444746)'};
+                background: ${this.currentTarget === 7.0 ? 'rgba(138, 180, 248, 0.18)' : 'transparent'};
+                color: ${this.currentTarget === 7.0 ? 'var(--gcal-accent, #8ab4f8)' : 'var(--gcal-secondary-text, #9aa0a6)'};
+                font-weight: 600;
+                font-size: 11px;
+                cursor: pointer;
+                transition: all 0.15s ease;
+              ">7.0</button>
+              <button type="button" class="cursa-target-btn ${this.currentTarget === 9.0 ? 'active' : ''}" data-target="9.0" style="
+                padding: 2px 8px;
+                border-radius: 10px;
+                border: 1px solid ${this.currentTarget === 9.0 ? 'var(--gcal-accent, #8ab4f8)' : 'var(--gcal-border, #444746)'};
+                background: ${this.currentTarget === 9.0 ? 'rgba(138, 180, 248, 0.18)' : 'transparent'};
+                color: ${this.currentTarget === 9.0 ? 'var(--gcal-accent, #8ab4f8)' : 'var(--gcal-secondary-text, #9aa0a6)'};
+                font-weight: 600;
+                font-size: 11px;
+                cursor: pointer;
+                transition: all 0.15s ease;
+              ">9.0</button>
             </div>
+          </div>
+
+          <div style="
+            font-size: ${targetCalc.isPossible ? '32px' : '22px'};
+            font-weight: 500;
+            font-family: 'Google Sans', Roboto, sans-serif;
+            color: ${targetStatus.targetStatusColor};
+            line-height: 1.15;
+            margin: 6px 0 2px 0;
+          ">
+            ${targetCalc.isPossible ? targetCalc.requiredFinalGrade.toFixed(2) : 'Inalcanzable'}
+            ${targetCalc.isPossible ? '<span style="font-size: 13px; font-weight: 400; color: var(--gcal-secondary-text, #9aa0a6);">en pendientes</span>' : ''}
+          </div>
+
+          <div style="font-size: 12px; color: var(--gcal-secondary-text, #9aa0a6);">
+            Para obtener un <strong style="color: var(--gcal-text, #e8eaed);">${this.currentTarget.toFixed(1)}</strong> final
           </div>
         </div>
 
-        <!-- HUD 3: Simulador de Escenario en Tiempo Real -->
-        <div style="
-          background: var(--gcal-surface, #282a2d);
-          border: 1px solid var(--gcal-border, #444746);
-          border-radius: 16px;
-          padding: 16px 20px;
-          box-shadow: 0 1px 4px rgba(0,0,0,0.18);
-          display: flex;
-          flex-direction: column;
-          justify-content: space-between;
-        ">
-          <div>
-            <div style="display: flex; justify-content: space-between; align-items: center;">
-              <div style="
-                font-size: 11px;
-                font-weight: 600;
-                letter-spacing: 0.8px;
-                text-transform: uppercase;
-                color: var(--gcal-secondary-text, #9aa0a6);
-                display: flex;
-                align-items: center;
-                gap: 6px;
-              ">
-                <span>🎚️</span> <span>Simulador de Escenario</span>
-              </div>
-              <span style="
-                background: ${simStatusBg};
-                color: ${simStatusColor};
-                border: 1px solid ${simStatusBorder};
-                font-weight: 600;
-                font-size: 11px;
-                padding: 1px 8px;
-                border-radius: 8px;
-              ">${simStatusLabel}</span>
-            </div>
-
-            <div style="
-              font-size: 32px;
-              font-weight: 500;
-              font-family: 'Google Sans', Roboto, sans-serif;
-              color: ${simStatusColor};
-              line-height: 1.15;
-              margin: 6px 0 2px 0;
+        <div style="margin-top: 10px;">
+          <div style="display: flex; align-items: center; justify-content: space-between;">
+            <span style="
+              background: ${targetStatus.targetStatusBg};
+              color: ${targetStatus.targetStatusColor};
+              border: 1px solid ${targetStatus.targetStatusBorder};
+              font-weight: 600;
+              font-size: 11px;
+              padding: 2px 8px;
+              border-radius: 8px;
+              display: inline-block;
             ">
-              ${simResult.finalGrade.toFixed(2)}
-              <span style="font-size: 13px; font-weight: 400; color: var(--gcal-secondary-text, #9aa0a6);">Nota Final Estimada</span>
-            </div>
+              ${targetStatus.targetStatusLabel}
+            </span>
 
-            <div style="font-size: 12px; color: var(--gcal-secondary-text, #9aa0a6);">
-              Si en el resto obtienes: <strong style="color: var(--gcal-accent, #8ab4f8);">${this.simulatedScore.toFixed(1)}</strong>
-            </div>
-          </div>
-
-          <div style="margin-top: 10px;">
-            <input id="cursa-sim-slider" type="range" min="0" max="10" step="0.1" value="${this.simulatedScore}" style="
-              width: 100%;
-              height: 5px;
-              border-radius: 3px;
-              accent-color: var(--gcal-accent, #8ab4f8);
-              cursor: pointer;
-            " />
-            <div style="display: flex; justify-content: space-between; font-size: 10px; color: var(--gcal-secondary-text, #9aa0a6); margin-top: 2px;">
-              <span>0.0</span>
-              <span>5.0</span>
-              <span>10.0</span>
-            </div>
+            ${
+              targetCalc.isCutoffTriggered
+                ? `<span style="font-size: 11px; color: #fdd663; font-weight: 500;">
+                    🛡️ Corte de ${targetCalc.minCutoff?.toFixed(2)}
+                  </span>`
+                : ''
+            }
           </div>
         </div>
       </div>
+    `;
+  }
 
+  private renderSimulatorCard(
+    simResult: ReturnType<typeof calculateSimulatedFinalGrade>,
+    simStatus: { simStatusColor: string; simStatusBg: string; simStatusBorder: string; simStatusLabel: string }
+  ): string {
+    return `
+      <!-- HUD 3: Simulador de Escenario en Tiempo Real -->
+      <div style="
+        background: var(--gcal-surface, #282a2d);
+        border: 1px solid var(--gcal-border, #444746);
+        border-radius: 16px;
+        padding: 16px 20px;
+        box-shadow: 0 1px 4px rgba(0,0,0,0.18);
+        display: flex;
+        flex-direction: column;
+        justify-content: space-between;
+      ">
+        <div>
+          <div style="display: flex; justify-content: space-between; align-items: center;">
+            <div style="
+              font-size: 11px;
+              font-weight: 600;
+              letter-spacing: 0.8px;
+              text-transform: uppercase;
+              color: var(--gcal-secondary-text, #9aa0a6);
+              display: flex;
+              align-items: center;
+              gap: 6px;
+            ">
+              <span>🎚️</span> <span>Simulador de Escenario</span>
+            </div>
+            <span id="cursa-sim-status-badge" style="
+              background: ${simStatus.simStatusBg};
+              color: ${simStatus.simStatusColor};
+              border: 1px solid ${simStatus.simStatusBorder};
+              font-weight: 600;
+              font-size: 11px;
+              padding: 1px 8px;
+              border-radius: 8px;
+            ">${simStatus.simStatusLabel}</span>
+          </div>
+
+          <div id="cursa-sim-final-grade-box" style="
+            font-size: 32px;
+            font-weight: 500;
+            font-family: 'Google Sans', Roboto, sans-serif;
+            color: ${simStatus.simStatusColor};
+            line-height: 1.15;
+            margin: 6px 0 2px 0;
+          ">
+            <span id="cursa-sim-final-grade-val">${simResult.finalGrade.toFixed(2)}</span>
+            <span style="font-size: 13px; font-weight: 400; color: var(--gcal-secondary-text, #9aa0a6);">Nota Final Estimada</span>
+          </div>
+
+          <div style="font-size: 12px; color: var(--gcal-secondary-text, #9aa0a6);">
+            Si en el resto obtienes: <strong id="cursa-sim-score-val" style="color: var(--gcal-accent, #8ab4f8);">${this.simulatedScore.toFixed(1)}</strong>
+          </div>
+        </div>
+
+        <div style="margin-top: 10px;">
+          <input id="cursa-sim-slider" type="range" min="0" max="10" step="0.1" value="${this.simulatedScore}" style="
+            width: 100%;
+            height: 5px;
+            border-radius: 3px;
+            accent-color: var(--gcal-accent, #8ab4f8);
+            cursor: pointer;
+          " />
+          <div style="display: flex; justify-content: space-between; font-size: 10px; color: var(--gcal-secondary-text, #9aa0a6); margin-top: 2px;">
+            <span>0.0</span>
+            <span>5.0</span>
+            <span>10.0</span>
+          </div>
+        </div>
+      </div>
+    `;
+  }
+
+  private renderOutlinerSection(
+    groups: GradeGroup[],
+    config: SubjectGradesConfig,
+    allExpanded: boolean,
+    totalWeight: number,
+    isSum100: boolean
+  ): string {
+    return `
       <!-- Outliner Control Bar (Estructura 6 Notion/Things Tree Header) -->
       <div style="
         display: flex;
@@ -848,6 +948,50 @@ export class GradesSimulatorView {
           ${config.items.length} evaluaciones registradas en ${groups.length} bloques
         </div>
       </div>
+    `;
+  }
+
+  private renderSimulatorContent(): string {
+    if (!this.currentConfig) return '';
+
+    const config = this.currentConfig;
+    const adapter = GoogleCalendarAdapter.getInstance();
+    const colorMap = adapter.getSubjectColorMap();
+    const subjColor = adapter.findSubjectColor(this.activeSubject, colorMap);
+
+    const { accumulatedPoints, gradedWeight, totalWeight } = calculateAccumulatedScore(config.items);
+    const isSum100 = totalWeight === 100;
+    const targetCalc = calculateTargetRequiredGrade(
+      config.items,
+      this.currentTarget,
+      config.minFinalGradeRequired,
+      config.blockCutoffs
+    );
+    const simResult = calculateSimulatedFinalGrade(config.items, this.simulatedScore, config.minFinalGradeRequired, config.blockCutoffs);
+
+    // Dynamic grouping into Generalist Material 3 Outliner Blocks (Estructura 6)
+    const groups = groupGradeItems(config.items, config.blockCutoffs);
+    if (this.expandedGroups.size === 0 && groups.length > 0) {
+      groups.forEach((g) => this.expandedGroups.add(g.id));
+    }
+    const allExpanded = groups.length > 0 && groups.every((g) => this.expandedGroups.has(g.id));
+
+    const targetStatus = this.getTargetStatusColors(targetCalc);
+    const simStatus = this.getSimStatusColors(simResult);
+
+    return `
+      ${this.renderSubjectHeader(config, subjColor, accumulatedPoints, gradedWeight)}
+      <!-- Integrated HUD Summary Strip (Progreso + Objetivo + Simulador) -->
+      <div style="
+        display: grid;
+        grid-template-columns: repeat(3, 1fr);
+        gap: 14px;
+      ">
+        ${this.renderProgressCard(accumulatedPoints, gradedWeight)}
+        ${this.renderTargetCard(targetCalc, targetStatus)}
+        ${this.renderSimulatorCard(simResult, simStatus)}
+      </div>
+      ${this.renderOutlinerSection(groups, config, allExpanded, totalWeight, isSum100)}
     `;
   }
 
@@ -1330,6 +1474,14 @@ export class GradesSimulatorView {
   private attachEvents(): void {
     if (!this.containerEl) return;
 
+    // Open Academic Plan / Course Settings
+    this.containerEl.querySelector('#cursa-grades-open-plan-btn')?.addEventListener('click', () => {
+      OnboardingModal.getInstance().open(true);
+    });
+    this.containerEl.querySelector('#cursa-grades-empty-term-config-btn')?.addEventListener('click', () => {
+      OnboardingModal.getInstance().open(true);
+    });
+
     // Subject tabs
     this.containerEl.querySelectorAll<HTMLButtonElement>('.cursa-grade-subj-tab').forEach((btn) => {
       btn.addEventListener('click', () => {
@@ -1558,11 +1710,11 @@ export class GradesSimulatorView {
               this.currentConfig.items[idx].linkedEventTitle = picked.eventTitle;
               saveSubjectGrades(this.currentConfig);
             }
-            if (overlay) overlay.style.display = 'block';
+            if (overlay) overlay.style.display = 'flex';
             this.render();
           },
           () => {
-            if (overlay) overlay.style.display = 'block';
+            if (overlay) overlay.style.display = 'flex';
           }
         );
       });
@@ -1601,12 +1753,46 @@ export class GradesSimulatorView {
       });
     });
 
-    // Slider
+    // Slider: update simulation readout in-place on `input` so continuous pointer/keyboard drag is preserved
     const slider = this.containerEl.querySelector('#cursa-sim-slider') as HTMLInputElement;
     slider?.addEventListener('input', () => {
       this.simulatedScore = parseFloat(slider.value);
-      this.render();
+      this.updateSimulationCardLive();
     });
+  }
+
+  private updateSimulationCardLive(): void {
+    if (!this.containerEl || !this.currentConfig) return;
+    const simResult = calculateSimulatedFinalGrade(
+      this.currentConfig.items,
+      this.simulatedScore,
+      this.currentConfig.minFinalGradeRequired,
+      this.currentConfig.blockCutoffs
+    );
+    const simStatus = this.getSimStatusColors(simResult);
+
+    const scoreValEl = this.containerEl.querySelector('#cursa-sim-score-val') as HTMLElement | null;
+    if (scoreValEl) {
+      scoreValEl.textContent = this.simulatedScore.toFixed(1);
+    }
+
+    const gradeValEl = this.containerEl.querySelector('#cursa-sim-final-grade-val') as HTMLElement | null;
+    if (gradeValEl) {
+      gradeValEl.textContent = simResult.finalGrade.toFixed(2);
+    }
+
+    const gradeBoxEl = this.containerEl.querySelector('#cursa-sim-final-grade-box') as HTMLElement | null;
+    if (gradeBoxEl) {
+      gradeBoxEl.style.color = simStatus.simStatusColor;
+    }
+
+    const badgeEl = this.containerEl.querySelector('#cursa-sim-status-badge') as HTMLElement | null;
+    if (badgeEl) {
+      badgeEl.textContent = simStatus.simStatusLabel;
+      badgeEl.style.color = simStatus.simStatusColor;
+      badgeEl.style.background = simStatus.simStatusBg;
+      badgeEl.style.borderColor = simStatus.simStatusBorder;
+    }
   }
 
   private openAIChat(): void {

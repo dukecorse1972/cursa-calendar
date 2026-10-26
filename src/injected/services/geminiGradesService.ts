@@ -1,4 +1,4 @@
-import { AISyllabusExtraction, AISyllabusItem, GradeItemType } from '../../shared/gradesTypes';
+import { AISyllabusExtraction, AISyllabusItem } from '../../shared/gradesTypes';
 import { getIsolatedItem, setIsolatedItem, removeIsolatedItem } from '../utils/storage';
 
 const GEMINI_API_KEY_STORAGE_KEY = 'gcal_gemini_api_key';
@@ -140,13 +140,21 @@ Extrae la estructura formal de evaluación cumpliendo el esquema JSON requerido.
       const endpoint = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${encodeURIComponent(apiKey)}`;
 
       try {
-        const response = await fetch(endpoint, {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json'
-          },
-          body: JSON.stringify(payload)
-        });
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => controller.abort(), 15000);
+        let response: Response;
+        try {
+          response = await fetch(endpoint, {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json'
+            },
+            body: JSON.stringify(payload),
+            signal: controller.signal
+          });
+        } finally {
+          clearTimeout(timeoutId);
+        }
 
         if (response.ok) {
           const data = await response.json();
@@ -227,29 +235,38 @@ Extrae la estructura formal de evaluación cumpliendo el esquema JSON requerido.
 
     if (hasTeoria && hasPractica && clean.includes('50%')) {
       // THEORY BLOCK (50% global)
-      // Test (Temas 1 y 2): 30% of theory = 15% global
-      const testMatch = clean.match(/test\D*?(\d{1,2})\s*%/i);
-      const testWeight = testMatch ? (parseInt(testMatch[1], 10) <= 30 ? 15 : parseInt(testMatch[1], 10)) : 15;
-      const testDate = /mediados de noviembre/i.test(clean) ? 'Mediados de noviembre' : undefined;
-      items.push({
-        name: 'Teoría: Test (Temas 1 y 2)',
-        type: 'EXAMEN',
-        weight: testWeight,
-        dateHint: testDate,
-        category: 'Teoría'
-      });
+      if (/test|problemas/i.test(clean)) {
+        const testMatch = clean.match(/test\D*?(\d{1,2})\s*%/i);
+        const testWeight = testMatch ? (parseInt(testMatch[1], 10) <= 30 ? 15 : parseInt(testMatch[1], 10)) : 15;
+        const testDate = /mediados de noviembre/i.test(clean) ? 'Mediados de noviembre' : undefined;
+        items.push({
+          name: 'Teoría: Test (Temas 1 y 2)',
+          type: 'EXAMEN',
+          weight: testWeight,
+          dateHint: testDate,
+          category: 'Teoría'
+        });
 
-      // Problems Exam: 70% of theory = 35% global
-      const probMatch = clean.match(/(?:problemas|examen de problemas)\D*?(\d{1,2})\s*%/i);
-      const probWeight = probMatch ? (parseInt(probMatch[1], 10) >= 50 ? 35 : parseInt(probMatch[1], 10)) : 35;
-      const probDate = clean.match(/(\d{1,2}[\/-]\d{1,2}[\/-]\d{2,4})/)?.[1] || '25/01/2027';
-      items.push({
-        name: 'Teoría: Examen de problemas',
-        type: 'EXAMEN',
-        weight: probWeight,
-        dateHint: probDate,
-        category: 'Teoría'
-      });
+        const probMatch = clean.match(/(?:problemas|examen de problemas)\D*?(\d{1,2})\s*%/i);
+        const probWeight = probMatch ? (parseInt(probMatch[1], 10) >= 50 ? 35 : parseInt(probMatch[1], 10)) : (50 - testWeight);
+        const probDate = clean.match(/(\d{1,2}[\/-]\d{1,2}[\/-]\d{2,4})/)?.[1];
+        items.push({
+          name: 'Teoría: Examen de problemas',
+          type: 'EXAMEN',
+          weight: probWeight,
+          dateHint: probDate,
+          category: 'Teoría'
+        });
+      } else {
+        const theoryDate = clean.match(/(\d{1,2}[\/-]\d{1,2}[\/-]\d{2,4})/)?.[1];
+        items.push({
+          name: 'Bloque de Teoría',
+          type: 'EXAMEN',
+          weight: 50,
+          dateHint: theoryDate,
+          category: 'Teoría'
+        });
+      }
 
       // PRACTICES BLOCK (50% global)
       // Check for pre-existing grade (e.g. 7.33)
@@ -300,23 +317,32 @@ Extrae la estructura formal de evaluación cumpliendo el esquema JSON requerido.
         });
       }
     } else {
-      // 3. General detection: Final Exam, Practices, Partials
-      let finalWeight = 50;
-      const finalMatch = clean.match(/(?:examen\s*final|prueba\s*final|final)\D*?(\d{1,2})\s*%/i);
-      if (finalMatch) {
-        finalWeight = parseInt(finalMatch[1], 10);
-      }
+      // 3. General detection: Final Exam, Practices, Partials (respecting only mentioned categories)
+      const finalMatch = clean.match(/(?:examen\s*final|prueba\s*final|final)\D*?(\d{1,3})\s*%/i);
+      const practiceMatch = clean.match(/(?:pr[aá]ctica|laboratorio|memoria|entrega|proyecto)s?\D*?(\d{1,3})\s*%/i);
+      const partialMatch = clean.match(/(?:parcial|control|continua)es?\D*?(\d{1,3})\s*%/i);
 
-      let practiceWeight = 30;
-      const practiceMatch = clean.match(/(?:pr[aá]ctica|laboratorio|memoria|entrega)s?\D*?(\d{1,2})\s*%/i);
-      if (practiceMatch) {
-        practiceWeight = parseInt(practiceMatch[1], 10);
-      }
+      const hasAnyExplicitWeight = Boolean(finalMatch || practiceMatch || partialMatch);
 
-      let partialWeight = Math.max(0, 100 - finalWeight - practiceWeight);
-      const partialMatch = clean.match(/(?:parcial|control)es?\D*?(\d{1,2})\s*%/i);
-      if (partialMatch) {
-        partialWeight = parseInt(partialMatch[1], 10);
+      const mentionsFinal = Boolean(finalMatch) || /examen\s*final|prueba\s*final|\bfinal\b/i.test(clean);
+      const mentionsPractice = Boolean(practiceMatch) || /pr[aá]ctica|laboratorio|memoria|entrega|proyecto/i.test(clean);
+      const mentionsPartial = Boolean(partialMatch) || /parcial|control|continua/i.test(clean);
+
+      let finalWeight = finalMatch ? parseInt(finalMatch[1], 10) : (hasAnyExplicitWeight ? 0 : 50);
+      let practiceWeight = practiceMatch ? parseInt(practiceMatch[1], 10) : (hasAnyExplicitWeight ? 0 : 30);
+      let partialWeight = partialMatch ? parseInt(partialMatch[1], 10) : (hasAnyExplicitWeight ? 0 : 20);
+
+      // Fill remainder if one mentioned category had no explicit percentage attached
+      const assignedSum = finalWeight + practiceWeight + partialWeight;
+      if (hasAnyExplicitWeight && assignedSum < 100) {
+        const remainder = 100 - assignedSum;
+        if (!finalMatch && mentionsFinal) {
+          finalWeight = remainder;
+        } else if (!practiceMatch && mentionsPractice) {
+          practiceWeight = remainder;
+        } else if (!partialMatch && mentionsPartial) {
+          partialWeight = remainder;
+        }
       }
 
       // Check count of partials
