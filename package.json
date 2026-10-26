@@ -11,7 +11,7 @@
     "build:preload": "esbuild src/preload/index.ts --bundle --platform=node --external:electron --outfile=dist/preload/bundle.js",
     "build": "tsc && npm run build:preload",
     "watch": "tsc -w",
-    "test": "npm run build && node --test dist/tests/core.test.js dist/tests/adapter.test.js dist/tests/validators.test.js dist/tests/selectors.test.js dist/tests/logger.test.js dist/tests/onboarding-palettes.test.js dist/tests/generalization-audit.test.js dist/tests/grades.test.js dist/tests/gcal-automation.test.js",
+    "test": "npm run build && node --test --test-concurrency=1 dist/tests/core.test.js dist/tests/adapter.test.js dist/tests/validators.test.js dist/tests/selectors.test.js dist/tests/logger.test.js dist/tests/onboarding-palettes.test.js dist/tests/generalization-audit.test.js dist/tests/grades.test.js dist/tests/gcal-automation.test.js",
     "test:auth": "npm run build && electron src/tests/auth-flow.integration.js",
     "start": "npm run build && electron .",
     "dev": "npm run build && electron .",

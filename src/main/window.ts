@@ -64,9 +64,10 @@ export function resolveSafeDebugScreenshotPath(filePath: unknown): string | null
   } catch (_) {}
 
   const isInsideAllowedRoot = allowedRoots.some((root) => {
-    const normalizedRoot = process.platform === 'win32' ? root.toLowerCase() : root;
-    const normalizedTarget = process.platform === 'win32' ? resolved.toLowerCase() : resolved;
-    return normalizedTarget.startsWith(normalizedRoot + path.sep);
+    const normRoot = process.platform === 'win32' ? root.toLowerCase() : root;
+    const normTarget = process.platform === 'win32' ? resolved.toLowerCase() : resolved;
+    const rel = path.relative(normRoot, normTarget);
+    return Boolean(rel && !rel.startsWith('..') && !path.isAbsolute(rel));
   });
 
   return isInsideAllowedRoot ? resolved : null;
@@ -109,7 +110,7 @@ export function waitForEventEditExit(win: BrowserWindow, timeoutMs: number): Pro
 
     win.webContents.on('did-navigate', checkNav);
     win.webContents.on('did-navigate-in-page', checkNav);
-    pollTimer = setInterval(checkNav, 150);
+    pollTimer = setInterval(checkNav, 40);
     maxTimer = setTimeout(() => finish(isOffEventEdit()), timeoutMs);
   });
 }

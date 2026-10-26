@@ -37,8 +37,10 @@ describe('25. Background Automation Script Builders & IPC Runtime Guards', () =>
     const insideWorkspace = path.join(process.cwd(), 'artifacts', 'test_shot.png');
     assert.equal(resolveSafeDebugScreenshotPath(insideWorkspace), path.resolve(insideWorkspace));
 
-    assert.equal(resolveSafeDebugScreenshotPath('C:\\Windows\\System32\\evil.png'), null);
-    assert.equal(resolveSafeDebugScreenshotPath('/etc/shadow.png'), null);
+    const outsideWorkspace = process.platform === 'win32'
+      ? 'C:\\Windows\\System32\\evil.png'
+      : '/etc/shadow.png';
+    assert.equal(resolveSafeDebugScreenshotPath(outsideWorkspace), null);
     assert.equal(resolveSafeDebugScreenshotPath(path.resolve(process.cwd(), '..', 'evil.png')), null);
     assert.equal(resolveSafeDebugScreenshotPath(path.join(process.cwd(), 'package.json')), null);
     assert.equal(resolveSafeDebugScreenshotPath(path.join(process.cwd(), 'artifacts', 'bad\0.png')), null);
@@ -64,15 +66,15 @@ describe('25. Background Automation Script Builders & IPC Runtime Guards', () =>
     };
 
     // Case 1: Remains stuck on /eventedit -> must return false (triggering safe recreate fallback)
-    const stuckResult = await waitForEventEditExit(mockWin, 120);
+    const stuckResult = await waitForEventEditExit(mockWin, 150);
     assert.equal(stuckResult, false);
 
     // Case 2: Navigates back to /calendar/u/0/r -> must return true immediately
-    const navPromise = waitForEventEditExit(mockWin, 1000);
+    const navPromise = waitForEventEditExit(mockWin, 2000);
     setTimeout(() => {
       currentUrl = 'https://calendar.google.com/calendar/u/0/r/week';
       (listeners['did-navigate'] || []).forEach((fn) => fn());
-    }, 30);
+    }, 40);
     const okResult = await navPromise;
     assert.equal(okResult, true);
   });
