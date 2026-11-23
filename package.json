@@ -28,6 +28,7 @@
     "files": [
       "dist/main/**/*",
       "dist/shared/**/*",
+      "dist/injected/adapter/selectors.js",
       "dist/preload/bundle.js",
       "!dist/**/*.map",
       "assets/icon.ico",

@@ -1,20 +1,45 @@
 import { safeSetInnerHTML, escapeHtml } from '../../utils/dom';
-import { SubjectGradesConfig, GradeItemType } from '../../../shared/gradesTypes';
-import { getSubjectGrades, saveSubjectGrades, deleteSubjectGrades, createInitialSubjectGrades } from '../../services/gradesStorage';
+import {
+  CutoffDiagnostic,
+  GradeItemType,
+  SimulatedGradesMap,
+  SubjectGradesConfig
+} from '../../../shared/gradesTypes';
+import {
+  getSubjectGrades,
+  saveSubjectGrades,
+  deleteSubjectGrades,
+  createInitialSubjectGrades
+} from '../../services/gradesStorage';
 import {
   calculateAccumulatedScore,
+  calculateScenarioSimulation,
   calculateTargetRequiredGrade,
-  calculateSimulatedFinalGrade,
+  calculateTermSummary,
   groupGradeItems,
+  normalizeWeightsTo100,
   GradeGroup,
-  GradeSubgroup,
-  GradeGroupItem
+  GradeGroupItem,
+  GradeSubgroup
 } from '../../../shared/gradesCalculator';
 import { GoogleCalendarAdapter } from '../../adapter/GoogleCalendarAdapter';
 import { GradesChatModal } from './gradesChatModal';
 import { CalendarPickerMode } from './calendarPickerMode';
 import { getAcademicPlan, formatPeriodLabel, isTermCompleted } from '../../services/academicPlanService';
 import { OnboardingModal } from '../onboardingModal';
+import { GRADES_ICONS } from './gradesIcons';
+import { injectGradesStyles } from './gradesStyles';
+import { ThemeManager } from '../../theme/ThemeManager';
+
+const OVERVIEW_TAB_ID = '__CURSA_OVERVIEW__';
+const BLOCK_SEGMENT_COLORS = ['#3b82f6', '#10b981', '#8b5cf6', '#f59e0b', '#ec4899', '#06b6d4'];
+
+const TYPE_CYCLE: GradeItemType[] = ['EXAMEN', 'ENTREGA', 'OTRO'];
+const TYPE_LABELS: Record<GradeItemType, string> = {
+  EXAMEN: 'Examen',
+  ENTREGA: 'Entrega',
+  OTRO: 'Otro'
+};
 
 export class GradesSimulatorView {
   private static instance: GradesSimulatorView | null = null;
@@ -22,8 +47,12 @@ export class GradesSimulatorView {
   private activeSubject: string = '';
   private currentConfig: SubjectGradesConfig | null = null;
   private currentTarget: number = 5.0;
-  private simulatedScore: number = 5.0;
+  private fallbackSimScore: number = 5.0;
+  private simulatedGrades: SimulatedGradesMap = {};
+  private simInputModeIds: Set<string> = new Set();
   private expandedGroups: Set<string> = new Set();
+  private pendingDeleteConfirm: boolean = false;
+  private themeUnsubscribe: (() => void) | null = null;
 
   public static getInstance(): GradesSimulatorView {
     if (!GradesSimulatorView.instance) {
@@ -35,7 +64,16 @@ export class GradesSimulatorView {
   private constructor() {}
 
   public mount(parent: HTMLElement): void {
+    injectGradesStyles();
     this.containerEl = parent;
+    if (!this.themeUnsubscribe) {
+      this.themeUnsubscribe = ThemeManager.getInstance().onThemeChange((mode) => {
+        const root = this.containerEl?.querySelector('#cursa-grades-view-root');
+        if (root) {
+          root.setAttribute('data-cg-theme', mode === 'DARK' ? 'dark' : 'light');
+        }
+      });
+    }
     const detectedClasses = GoogleCalendarAdapter.getInstance().getDetectedClasses();
     if (detectedClasses.length === 0) {
       this.activeSubject = '';
@@ -43,20 +81,37 @@ export class GradesSimulatorView {
       this.render();
       return;
     }
-    if (!this.activeSubject || !detectedClasses.includes(this.activeSubject)) {
+    if (
+      !this.activeSubject ||
+      (this.activeSubject !== OVERVIEW_TAB_ID && !detectedClasses.includes(this.activeSubject))
+    ) {
       this.activeSubject = detectedClasses[0];
     }
-    this.loadSubject(this.activeSubject);
+    if (this.activeSubject === OVERVIEW_TAB_ID) {
+      this.currentConfig = null;
+      this.render();
+    } else {
+      this.loadSubject(this.activeSubject);
+    }
   }
 
   public setActiveSubject(subject: string): void {
     this.activeSubject = subject;
-    this.loadSubject(subject);
+    this.pendingDeleteConfirm = false;
+    if (subject === OVERVIEW_TAB_ID) {
+      this.currentConfig = null;
+      this.render();
+    } else {
+      this.loadSubject(subject);
+    }
   }
 
   private loadSubject(subject: string): void {
     this.currentConfig = getSubjectGrades(subject);
+    this.simulatedGrades = {};
+    this.simInputModeIds.clear();
     this.expandedGroups.clear();
+    this.pendingDeleteConfirm = false;
     if (this.currentConfig) {
       const groups = groupGradeItems(this.currentConfig.items, this.currentConfig.blockCutoffs);
       groups.forEach((g) => this.expandedGroups.add(g.id));
@@ -66,755 +121,565 @@ export class GradesSimulatorView {
 
   public render(): void {
     if (!this.containerEl) return;
+    injectGradesStyles();
 
-    const detectedClasses = GoogleCalendarAdapter.getInstance().getDetectedClasses();
+    const scrollTop = this.containerEl.querySelector('#cursa-grades-view-root')?.scrollTop || 0;
+
     const adapter = GoogleCalendarAdapter.getInstance();
+    const detectedClasses = adapter.getDetectedClasses();
     const colorMap = adapter.getSubjectColorMap();
     const activePlan = getAcademicPlan();
     const activePeriodLabel = formatPeriodLabel(activePlan, activePlan.currentYear, activePlan.currentPeriod, false);
     const activeTermDone = isTermCompleted(activePlan.currentYear, activePlan.currentPeriod);
 
+    let bodyHtml = '';
+    if (detectedClasses.length === 0) {
+      bodyHtml = this.renderNoSubjectsState(activePeriodLabel);
+    } else if (this.activeSubject === OVERVIEW_TAB_ID) {
+      bodyHtml = this.renderTermOverview(detectedClasses, adapter, colorMap, activePeriodLabel);
+    } else if (!this.currentConfig) {
+      bodyHtml = this.renderEmptySubjectState(adapter, colorMap);
+    } else {
+      bodyHtml = this.renderSimulatorContent(adapter, colorMap);
+    }
+
+    const themeMode = ThemeManager.getInstance().getTheme() === 'DARK' ? 'dark' : 'light';
+
     safeSetInnerHTML(
       this.containerEl,
       `
-      <div id="cursa-grades-view-root" style="
-        width: 100%;
-        height: 100%;
-        overflow-y: auto;
-        overflow-x: hidden;
-        padding: 20px 32px 64px 32px;
-        box-sizing: border-box;
-        font-family: 'Google Sans', 'Google Sans Text', Roboto, -apple-system, sans-serif;
-        color: var(--gcal-text, #e8eaed);
-        display: flex;
-        flex-direction: column;
-        gap: 16px;
-        background: var(--gcal-bg, var(--gcal-background, #1f1f1f));
-        max-width: 1360px;
-        margin: 0 auto;
-      ">
-        <!-- Top Subject Tabs (Google Workspace Material 3 Style) -->
-        <div class="cursa-grades-tabs-scroll" style="
-          display: flex;
-          align-items: center;
-          gap: 10px;
-          overflow-x: auto;
-          flex-shrink: 0;
-          min-height: 44px;
-          padding: 2px 0 6px 0;
-          scrollbar-width: none !important;
-          -ms-overflow-style: none !important;
-        ">
-          <button type="button" id="cursa-grades-open-plan-btn" title="Cambiar de cuatrimestre o exportar copia portátil (.cursa.json)" style="
-            height: 36px;
-            padding: 0 14px;
-            border-radius: 18px;
-            border: 1.5px solid ${activeTermDone ? '#34a853' : 'var(--gcal-accent, #8ab4f8)'};
-            background: ${activeTermDone ? 'rgba(52, 168, 83, 0.14)' : 'rgba(138, 180, 248, 0.12)'};
-            color: ${activeTermDone ? '#34a853' : 'var(--gcal-accent, #8ab4f8)'};
-            font-family: 'Google Sans', Roboto, sans-serif;
-            font-weight: 700;
-            font-size: 12.5px;
-            cursor: pointer;
-            display: flex;
-            align-items: center;
-            gap: 6px;
-            white-space: nowrap;
-            flex-shrink: 0;
-            transition: all 0.15s ease;
-          ">
-            <span>🎓</span>
-            <span>${escapeHtml(activePeriodLabel)}${activeTermDone ? ' ✓' : ''}</span>
-            <span style="font-size: 10px; opacity: 0.8;">▾</span>
-          </button>
-          ${detectedClasses
-            .map((subj) => {
-              const isActive = subj === this.activeSubject;
-              const subjColor = adapter.findSubjectColor(subj, colorMap);
-              const config = getSubjectGrades(subj);
-              const credits = config?.credits || 6;
-              const isConfigured = !!config;
-
-              return `
-                <button type="button" class="cursa-grade-subj-tab" data-subj="${escapeHtml(subj)}" style="
-                  height: 36px;
-                  padding: 0 16px;
-                  border-radius: 18px;
-                  border: 1.5px solid ${isActive ? subjColor : 'var(--gcal-border, #444746)'};
-                  background: ${isActive ? 'var(--gcal-surface-hover, #35373b)' : 'var(--gcal-surface, #282a2d)'};
-                  color: ${isActive ? subjColor : 'var(--gcal-secondary-text, #9aa0a6)'};
-                  font-family: 'Google Sans', Roboto, sans-serif;
-                  font-weight: ${isActive ? '600' : '500'};
-                  font-size: 13.5px;
-                  cursor: pointer;
-                  display: flex;
-                  align-items: center;
-                  gap: 8px;
-                  white-space: nowrap;
-                  box-shadow: ${isActive ? '0 1px 4px rgba(0,0,0,0.25)' : 'none'};
-                  transition: all 0.15s ease;
-                " onmouseover="if(!this.dataset.active) { this.style.background='var(--gcal-surface-hover, #35373b)'; }" onmouseout="if(!this.dataset.active) { this.style.background='var(--gcal-surface, #282a2d)'; }" ${isActive ? 'data-active="true"' : ''}>
-                  <span style="
-                    width: 10px;
-                    height: 10px;
-                    border-radius: 50%;
-                    background: ${subjColor};
-                    display: inline-block;
-                    flex-shrink: 0;
-                  "></span>
-                  <span>${escapeHtml(subj)}</span>
-                  <span style="
-                    font-size: 11px;
-                    font-weight: 500;
-                    color: ${isActive ? subjColor : 'var(--gcal-secondary-text, #9aa0a6)'};
-                    background: ${isActive ? 'rgba(255,255,255,0.08)' : 'rgba(255,255,255,0.04)'};
-                    padding: 1px 6px;
-                    border-radius: 4px;
-                  ">${credits} ECTS</span>
-                  ${isConfigured ? '<span style="font-size: 11px; color: #81c995;" title="Configurada">✓</span>' : ''}
-                </button>
-              `;
-            })
-            .join('')}
+      <div id="cursa-grades-view-root" data-cg-theme="${themeMode}">
+        <div class="cg-shell">
+          ${this.renderNavRail(detectedClasses, adapter, colorMap, activePeriodLabel, activeTermDone)}
+          ${bodyHtml}
         </div>
-
-        ${detectedClasses.length === 0
-          ? this.renderNoSubjectsInTermState(activePeriodLabel)
-          : !this.currentConfig
-            ? this.renderEmptyState()
-            : this.renderSimulatorContent()}
       </div>
     `
     );
 
+    const root = this.containerEl.querySelector('#cursa-grades-view-root');
+    if (root && scrollTop > 0) {
+      root.scrollTop = scrollTop;
+    }
+
     this.attachEvents();
   }
 
-  private renderNoSubjectsInTermState(activePeriodLabel: string): string {
+  private renderNavRail(
+    detectedClasses: string[],
+    adapter: GoogleCalendarAdapter,
+    colorMap: Map<string, string>,
+    activePeriodLabel: string,
+    activeTermDone: boolean
+  ): string {
+    const isOverview = this.activeSubject === OVERVIEW_TAB_ID;
+
+    const subjectTabsHtml = detectedClasses
+      .map((subj) => {
+        const isActive = subj === this.activeSubject;
+        const subjColor = adapter.findSubjectColor(subj, colorMap);
+        const cfg = getSubjectGrades(subj);
+        let scoreBadge = '';
+        if (cfg && cfg.items.length > 0) {
+          const acc = calculateAccumulatedScore(cfg.items);
+          const label = acc.gradedWeight > 0 ? acc.accumulatedPoints.toFixed(1) : '0.0';
+          scoreBadge = `<span class="cg-tab-score">${label}</span>`;
+        }
+        return `
+          <button type="button" class="cg-tab cursa-grade-subj-tab ${isActive ? 'active' : ''}" data-subj="${escapeHtml(subj)}">
+            <span class="cg-tab-dot" style="background: ${subjColor};"></span>
+            <span>${escapeHtml(subj)}</span>
+            ${scoreBadge}
+          </button>
+        `;
+      })
+      .join('');
+
     return `
-      <div style="
-        flex: 1;
-        display: flex;
-        flex-direction: column;
-        align-items: center;
-        justify-content: center;
-        text-align: center;
-        padding: 64px 32px;
-        background: var(--gcal-surface, #282a2d);
-        border: 1px solid var(--gcal-border, #444746);
-        border-radius: 24px;
-        margin-top: 12px;
-        box-shadow: 0 2px 8px rgba(0,0,0,0.2);
-        gap: 14px;
-      ">
-        <div style="font-size: 40px;">🎓</div>
-        <h3 style="margin: 0; font-size: 20px; font-weight: 700; color: var(--gcal-text, #e8eaed);">
-          Sin asignaturas en ${escapeHtml(activePeriodLabel)}
-        </h3>
-        <p style="margin: 0; font-size: 14px; color: var(--gcal-secondary-text, #9aa0a6); max-width: 480px; line-height: 1.5;">
-          Este periodo aún no tiene asignaturas configuradas. Tus asignaturas y calificaciones de otros cuatrimestres están guardadas de forma segura.
+      <nav class="cg-nav-rail" aria-label="Asignaturas">
+        <button type="button" id="cursa-grades-open-plan-btn" class="cg-term-pill ${activeTermDone ? 'done' : ''}" title="Cambiar de cuatrimestre o exportar copia (.cursa.json)">
+          ${GRADES_ICONS.graduationCap(15)}
+          <span>${escapeHtml(activePeriodLabel)}</span>
+          ${activeTermDone ? GRADES_ICONS.check(13) : GRADES_ICONS.chevronDown(13)}
+        </button>
+
+        ${
+          detectedClasses.length > 0
+            ? `
+              <div class="cg-nav-divider"></div>
+              <button type="button" class="cg-tab cursa-grade-subj-tab ${isOverview ? 'active' : ''}" data-subj="${OVERVIEW_TAB_ID}">
+                ${GRADES_ICONS.grid(14)}
+                <span>Resumen</span>
+              </button>
+              ${subjectTabsHtml}
+            `
+            : ''
+        }
+      </nav>
+    `;
+  }
+
+  private renderNoSubjectsState(activePeriodLabel: string): string {
+    return `
+      <div class="cg-empty-state">
+        <div class="cg-empty-icon">${GRADES_ICONS.graduationCap(26)}</div>
+        <h2 style="margin: 0; font-size: 20px; font-weight: 600;">Sin asignaturas en ${escapeHtml(activePeriodLabel)}</h2>
+        <p style="margin: 0; font-size: 13.5px; color: var(--cg-muted); max-width: 460px; line-height: 1.55;">
+          Este periodo aún no tiene asignaturas configuradas. Tus datos de otros cuatrimestres están archivados de forma segura.
         </p>
-        <button type="button" id="cursa-grades-empty-term-config-btn" style="
-          margin-top: 6px;
-          padding: 10px 22px;
-          border-radius: 20px;
-          border: none;
-          background: var(--gcal-accent, #1a73e8);
-          color: #ffffff;
-          font-size: 13.5px;
-          font-weight: 600;
-          cursor: pointer;
-          box-shadow: 0 2px 8px rgba(26, 115, 232, 0.35);
-        ">
-          ⚙️ Configurar Asignaturas de ${escapeHtml(activePeriodLabel)}
+        <button type="button" id="cursa-grades-empty-term-config-btn" class="cg-btn cg-btn-primary" style="margin-top: 4px;">
+          Configurar asignaturas de ${escapeHtml(activePeriodLabel)}
         </button>
       </div>
     `;
   }
 
-  private renderEmptyState(): string {
-    const adapter = GoogleCalendarAdapter.getInstance();
-    const colorMap = adapter.getSubjectColorMap();
+  private renderTermOverview(
+    detectedClasses: string[],
+    adapter: GoogleCalendarAdapter,
+    colorMap: Map<string, string>,
+    activePeriodLabel: string
+  ): string {
+    const entries = detectedClasses.map((subjectName) => ({
+      subjectName,
+      color: adapter.findSubjectColor(subjectName, colorMap),
+      config: getSubjectGrades(subjectName)
+    }));
+    const summary = calculateTermSummary(entries);
+
+    return `
+      <div class="cg-header">
+        <div class="cg-header-left">
+          <div class="cg-subject-accent" style="background: var(--cg-accent);"></div>
+          <div>
+            <h1 class="cg-subject-title">Resumen · ${escapeHtml(activePeriodLabel)}</h1>
+            <div class="cg-subject-subtitle">
+              <span>${summary.configuredSubjects} de ${summary.totalSubjects} asignaturas configuradas</span>
+              <span>·</span>
+              <span>${summary.totalCredits} ECTS totales</span>
+            </div>
+          </div>
+        </div>
+        <div style="display: flex; gap: 18px; align-items: center; flex-wrap: wrap;">
+          <div style="text-align: right;">
+            <div style="font-size: 11px; text-transform: uppercase; letter-spacing: 0.05em; color: var(--cg-muted); font-weight: 600;">Media actual (ECTS)</div>
+            <div class="cg-num" style="font-size: 24px; font-weight: 600; color: var(--cg-accent);">
+              ${summary.weightedAverageCurrent !== null ? summary.weightedAverageCurrent.toFixed(2) : '—'}
+              <span style="font-size: 12px; color: var(--cg-muted); font-weight: 500;">/ 10</span>
+            </div>
+          </div>
+          <div style="text-align: right;">
+            <div style="font-size: 11px; text-transform: uppercase; letter-spacing: 0.05em; color: var(--cg-muted); font-weight: 600;">Asegurado (ECTS)</div>
+            <div class="cg-num" style="font-size: 24px; font-weight: 600; color: var(--cg-text);">
+              ${summary.weightedAssuredPoints.toFixed(2)}
+              <span style="font-size: 12px; color: var(--cg-muted); font-weight: 500;">pts</span>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="cg-overview-grid">
+        ${summary.subjects
+          .map((s) => {
+            let statusPill = `<span class="cg-pill cg-pill-neutral">Sin configurar</span>`;
+            if (s.isConfigured) {
+              if (s.hasCutoffFailed) {
+                statusPill = `<span class="cg-pill cg-pill-danger">Corte no superado</span>`;
+              } else if (s.isPassedAssured) {
+                statusPill = `<span class="cg-pill cg-pill-success">Aprobado asegurado</span>`;
+              } else if (s.hasCutoffRisk) {
+                statusPill = `<span class="cg-pill cg-pill-warn">Corte pendiente</span>`;
+              } else {
+                statusPill = `<span class="cg-pill cg-pill-accent">${s.gradedWeight}% evaluado</span>`;
+              }
+            }
+
+            return `
+              <div class="cg-overview-card cursa-overview-card-btn" data-subj="${escapeHtml(s.subjectName)}">
+                <div style="display: flex; justify-content: space-between; align-items: flex-start; gap: 8px;">
+                  <div style="display: flex; align-items: center; gap: 9px; min-width: 0;">
+                    <span class="cg-tab-dot" style="background: ${s.color}; width: 10px; height: 10px;"></span>
+                    <div style="font-weight: 600; font-size: 15px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">
+                      ${escapeHtml(s.subjectName)}
+                    </div>
+                  </div>
+                  <span style="font-size: 11.5px; color: var(--cg-muted); font-weight: 600; flex-shrink: 0;">${s.credits} ECTS</span>
+                </div>
+
+                ${
+                  s.isConfigured
+                    ? `
+                      <div style="display: flex; justify-content: space-between; align-items: baseline;">
+                        <div class="cg-num" style="font-size: 26px; font-weight: 600; color: var(--cg-text);">
+                          ${s.accumulatedPoints.toFixed(2)}
+                          <span style="font-size: 12px; color: var(--cg-muted); font-weight: 500;">pts asegurados</span>
+                        </div>
+                        <div class="cg-num" style="font-size: 12.5px; color: var(--cg-muted);">
+                          Media: <strong style="color: var(--cg-text);">${s.currentAverage !== null ? s.currentAverage.toFixed(2) : '—'}</strong>
+                        </div>
+                      </div>
+                      <div class="cg-progress-track">
+                        <div class="cg-progress-seg" style="width: ${Math.min(100, s.accumulatedPoints * 10)}%; background: ${s.color};"></div>
+                        <div class="cg-progress-marker"></div>
+                      </div>
+                    `
+                    : `<div style="font-size: 12.5px; color: var(--cg-muted); padding: 10px 0;">Haz clic para configurar su sistema de evaluación.</div>`
+                }
+
+                <div style="display: flex; justify-content: space-between; align-items: center;">
+                  ${statusPill}
+                  <span style="font-size: 11.5px; color: var(--cg-muted);">${s.isConfigured ? `${s.itemCount} hitos` : 'Configurar →'}</span>
+                </div>
+              </div>
+            `;
+          })
+          .join('')}
+      </div>
+    `;
+  }
+
+  private renderEmptySubjectState(adapter: GoogleCalendarAdapter, colorMap: Map<string, string>): string {
     const subjColor = adapter.findSubjectColor(this.activeSubject, colorMap);
 
     return `
-      <div style="
-        flex: 1;
-        display: flex;
-        flex-direction: column;
-        align-items: center;
-        justify-content: center;
-        text-align: center;
-        padding: 64px 32px;
-        background: var(--gcal-surface, #282a2d);
-        border: 1px solid var(--gcal-border, #444746);
-        border-radius: 24px;
-        margin-top: 12px;
-        box-shadow: 0 2px 8px rgba(0,0,0,0.2);
-      ">
-        <div style="
-          width: 72px;
-          height: 72px;
-          border-radius: 50%;
-          background: linear-gradient(135deg, rgba(26, 115, 232, 0.2) 0%, rgba(155, 114, 203, 0.25) 100%);
-          border: 1px solid rgba(138, 180, 248, 0.35);
-          display: flex;
-          align-items: center;
-          justify-content: center;
-          font-size: 32px;
-          margin-bottom: 20px;
-          box-shadow: 0 4px 16px rgba(0, 0, 0, 0.25);
-        ">
-          ✨
+      <div class="cg-empty-state">
+        <div class="cg-empty-icon" style="color: ${subjColor}; border-color: ${subjColor}55; background: ${subjColor}18;">
+          ${GRADES_ICONS.bookOpen(24)}
         </div>
-        <h2 style="
-          margin: 0 0 10px 0;
-          font-size: 22px;
-          font-weight: 500;
-          font-family: 'Google Sans', Roboto, sans-serif;
-          color: var(--gcal-text, #e8eaed);
-        ">
-          Configura el Sistema de Evaluación de <span style="color: ${subjColor}; font-weight: 600;">${escapeHtml(this.activeSubject)}</span>
+        <h2 style="margin: 0; font-size: 21px; font-weight: 600; letter-spacing: -0.02em;">
+          Configura <span style="color: ${subjColor};">${escapeHtml(this.activeSubject)}</span>
         </h2>
-        <p style="
-          margin: 0 0 28px 0;
-          max-width: 540px;
-          font-size: 14px;
-          line-height: 1.6;
-          color: var(--gcal-secondary-text, #9aa0a6);
-        ">
-          Define los exámenes, prácticas y ponderaciones para calcular automáticamente tus notas, objetivos y aportes. Puedes pegar directamente la guía docente o tu fórmula con nuestro <strong>Asistente Gemini</strong>.
+        <p style="margin: 0; max-width: 500px; font-size: 13.5px; line-height: 1.6; color: var(--cg-muted);">
+          Pega la guía docente o explícale al asistente cómo te califican. Separará bloques, temas, ponderaciones y notas de corte automáticamente.
         </p>
-        <div style="display: flex; gap: 14px; flex-wrap: wrap; justify-content: center;">
-          <button id="cursa-grades-open-ai-chat" type="button" style="
-            background: linear-gradient(135deg, #1a73e8 0%, #4285f4 50%, #9b72cb 100%);
-            color: #ffffff;
-            border: none;
-            padding: 11px 24px;
-            border-radius: 20px;
-            font-family: 'Google Sans', Roboto, sans-serif;
-            font-weight: 500;
-            font-size: 14px;
-            cursor: pointer;
-            box-shadow: 0 2px 6px rgba(0,0,0,0.3);
-            display: flex;
-            align-items: center;
-            gap: 10px;
-            transition: opacity 0.2s ease, transform 0.1s ease;
-          " onmouseover="this.style.opacity='0.9';" onmouseout="this.style.opacity='1';">
-            <span style="font-size: 16px;">✨</span>
-            <span>Configurar con Asistente Gemini</span>
+        <div style="display: flex; gap: 10px; flex-wrap: wrap; justify-content: center; margin-top: 6px;">
+          <button id="cursa-grades-open-ai-chat" type="button" class="cg-btn cg-btn-ai">
+            ${GRADES_ICONS.sparkles(15)}
+            <span>Configurar con Asistente IA</span>
           </button>
-          <button id="cursa-grades-use-template" type="button" style="
-            background: var(--gcal-surface-hover, #35373b);
-            color: var(--gcal-text, #e8eaed);
-            border: 1px solid var(--gcal-border, #444746);
-            padding: 11px 22px;
-            border-radius: 20px;
-            font-family: 'Google Sans', Roboto, sans-serif;
-            font-weight: 500;
-            font-size: 14px;
-            cursor: pointer;
-            transition: background 0.15s ease;
-          " onmouseover="this.style.background='var(--gcal-selected, #004a77)';" onmouseout="this.style.background='var(--gcal-surface-hover, #35373b)';">
-            Plantilla Estándar (Teoría 50% / Prácticas 50%)
+          <button id="cursa-grades-use-template" type="button" class="cg-btn">
+            <span>Plantilla estándar (Parcial + Prácticas + Final)</span>
+          </button>
+          <button id="cursa-grades-start-blank" type="button" class="cg-btn cg-btn-ghost">
+            <span>Empezar desde cero</span>
           </button>
         </div>
       </div>
     `;
   }
 
-private getTargetStatusColors(targetCalc: ReturnType<typeof calculateTargetRequiredGrade>): {
-    targetStatusColor: string;
-    targetStatusBg: string;
-    targetStatusBorder: string;
-    targetStatusLabel: string;
-  } {
-    let targetStatusColor = '#81c995';
-    let targetStatusBg = 'rgba(129, 201, 149, 0.15)';
-    let targetStatusBorder = 'rgba(129, 201, 149, 0.3)';
-    let targetStatusLabel = 'Factible (≤ 6.5)';
-    if (!targetCalc.isPossible) {
-      targetStatusColor = '#f28b82';
-      targetStatusBg = 'rgba(242, 139, 130, 0.15)';
-      targetStatusBorder = 'rgba(242, 139, 130, 0.3)';
-      targetStatusLabel = 'Inalcanzable (> 10.0)';
-    } else if (targetCalc.requiredFinalGrade > 8.5) {
-      targetStatusColor = '#fdd663';
-      targetStatusBg = 'rgba(253, 214, 99, 0.15)';
-      targetStatusBorder = 'rgba(253, 214, 99, 0.3)';
-      targetStatusLabel = 'Muy exigente (8.5 - 10)';
-    } else if (targetCalc.requiredFinalGrade > 6.5) {
-      targetStatusColor = '#8ab4f8';
-      targetStatusBg = 'rgba(138, 180, 248, 0.15)';
-      targetStatusBorder = 'rgba(138, 180, 248, 0.3)';
-      targetStatusLabel = 'Exigente (6.5 - 8.5)';
-    }
-    return { targetStatusColor, targetStatusBg, targetStatusBorder, targetStatusLabel };
-  }
+  private renderSimulatorContent(adapter: GoogleCalendarAdapter, colorMap: Map<string, string>): string {
+    if (!this.currentConfig) return '';
+    const config = this.currentConfig;
+    const subjColor = adapter.findSubjectColor(this.activeSubject, colorMap);
 
-  private getSimStatusColors(simResult: ReturnType<typeof calculateSimulatedFinalGrade>): {
-    simStatusColor: string;
-    simStatusBg: string;
-    simStatusBorder: string;
-    simStatusLabel: string;
-  } {
-    let simStatusColor = '#81c995';
-    let simStatusBg = 'rgba(129, 201, 149, 0.15)';
-    let simStatusBorder = 'rgba(129, 201, 149, 0.3)';
-    let simStatusLabel = 'Aprobado';
-    if (simResult.isCutoffFailed) {
-      simStatusColor = '#f28b82';
-      simStatusBg = 'rgba(242, 139, 130, 0.15)';
-      simStatusBorder = 'rgba(242, 139, 130, 0.3)';
-      simStatusLabel = simResult.failedBlockCutoff
-        ? `Corte no superado: ${simResult.failedBlockCutoff}`
-        : `Corte no superado (< ${simResult.minCutoff?.toFixed(2)})`;
-    } else if (simResult.finalGrade >= 9.0) {
-      simStatusColor = '#81c995';
-      simStatusBg = 'rgba(129, 201, 149, 0.15)';
-      simStatusBorder = 'rgba(129, 201, 149, 0.3)';
-      simStatusLabel = 'Sobresaliente';
-    } else if (simResult.finalGrade >= 7.0) {
-      simStatusColor = '#8ab4f8';
-      simStatusBg = 'rgba(138, 180, 248, 0.15)';
-      simStatusBorder = 'rgba(138, 180, 248, 0.3)';
-      simStatusLabel = 'Notable';
-    } else if (simResult.finalGrade >= 5.0) {
-      simStatusColor = '#81c995';
-      simStatusBg = 'rgba(129, 201, 149, 0.15)';
-      simStatusBorder = 'rgba(129, 201, 149, 0.3)';
-      simStatusLabel = 'Aprobado';
-    } else {
-      simStatusColor = '#f28b82';
-      simStatusBg = 'rgba(242, 139, 130, 0.15)';
-      simStatusBorder = 'rgba(242, 139, 130, 0.3)';
-      simStatusLabel = 'Suspenso (< 5.0)';
+    const acc = calculateAccumulatedScore(config.items);
+    const targetCalc = calculateTargetRequiredGrade(
+      config.items,
+      this.currentTarget,
+      config.minFinalGradeRequired,
+      config.blockCutoffs
+    );
+    const simResult = calculateScenarioSimulation(
+      config.items,
+      this.simulatedGrades,
+      this.fallbackSimScore,
+      config.minFinalGradeRequired,
+      config.blockCutoffs
+    );
+
+    const groups = groupGradeItems(config.items, config.blockCutoffs);
+    if (this.expandedGroups.size === 0 && groups.length > 0) {
+      groups.forEach((g) => this.expandedGroups.add(g.id));
     }
-    return { simStatusColor, simStatusBg, simStatusBorder, simStatusLabel };
+    const allExpanded = groups.length > 0 && groups.every((g) => this.expandedGroups.has(g.id));
+    const isSum100 = Math.abs(acc.totalWeight - 100) < 0.05;
+
+    return `
+      ${this.renderSubjectHeader(config, subjColor, acc, targetCalc)}
+      ${this.pendingDeleteConfirm ? this.renderDeleteConfirmBar(config.subjectName) : ''}
+
+      <div class="cg-kpi-grid" id="cg-kpi-grid">
+        ${this.renderProgressCard(acc, groups)}
+        ${this.renderTargetCard(targetCalc)}
+        ${this.renderScenarioCard(simResult)}
+      </div>
+
+      <div id="cg-cutoffs-strip-container">
+        ${this.renderCutoffsStrip(simResult.cutoffDiagnostics)}
+      </div>
+
+      ${this.renderTreeToolbar(groups, config, allExpanded)}
+
+      <div class="cg-blocks-stack">
+        ${groups.map((group, idx) => this.renderBlockCard(group, idx)).join('')}
+      </div>
+
+      <div id="cg-weight-footer-container">
+        ${this.renderWeightFooter(acc.totalWeight, isSum100, config.items.length, groups.length)}
+      </div>
+    `;
   }
 
   private renderSubjectHeader(
     config: SubjectGradesConfig,
     subjColor: string,
-    accumulatedPoints: number,
-    gradedWeight: number
+    acc: ReturnType<typeof calculateAccumulatedScore>,
+    targetCalc: ReturnType<typeof calculateTargetRequiredGrade>
   ): string {
+    const anyCutoffFailed = (targetCalc.cutoffDiagnostics || []).some(
+      (d) => d.status === 'FAILED' || d.status === 'IMPOSSIBLE'
+    );
+    let statusBadge = `<span class="cg-pill cg-pill-accent">Faltan ${(Math.max(0, 5 - acc.accumulatedPoints)).toFixed(2)} pts para 5.0</span>`;
+    if (anyCutoffFailed) {
+      statusBadge = `<span class="cg-pill cg-pill-danger">${GRADES_ICONS.shieldAlert(12)} Corte no superado</span>`;
+    } else if (acc.accumulatedPoints >= 5.0 && (targetCalc.cutoffDiagnostics || []).every((d) => d.status === 'MET')) {
+      statusBadge = `<span class="cg-pill cg-pill-success">${GRADES_ICONS.check(12)} Aprobado asegurado</span>`;
+    } else if (acc.accumulatedPoints >= 5.0) {
+      statusBadge = `<span class="cg-pill cg-pill-warn">${GRADES_ICONS.shield(12)} 5.0 alcanzado · Falta corte</span>`;
+    }
+
     return `
-      <!-- Subject Header Bar (Sleek Notion/Raycast Studio Style) -->
-      <div style="
-        display: flex;
-        justify-content: space-between;
-        align-items: center;
-        background: var(--gcal-surface, #282a2d);
-        padding: 16px 22px;
-        border-radius: 16px;
-        border: 1px solid var(--gcal-border, #444746);
-        box-shadow: 0 1px 4px rgba(0,0,0,0.18);
-      ">
-        <div style="display: flex; align-items: center; gap: 14px;">
-          <div style="
-            width: 44px;
-            height: 44px;
-            border-radius: 12px;
-            background: ${subjColor}1a;
-            border: 1.5px solid ${subjColor};
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            font-size: 20px;
-            color: ${subjColor};
-          ">
-            📚
-          </div>
-          <div>
-            <div style="display: flex; align-items: center; gap: 10px;">
-              <h1 style="
-                margin: 0;
-                font-size: 21px;
-                font-weight: 600;
-                font-family: 'Google Sans', Roboto, sans-serif;
-                color: var(--gcal-text, #e8eaed);
-              ">
-                ${escapeHtml(config.subjectName)}
-              </h1>
-              <span style="
-                font-size: 12px;
-                background: var(--gcal-surface-hover, #35373b);
-                color: var(--gcal-secondary-text, #9aa0a6);
-                border: 1px solid var(--gcal-border, #444746);
-                font-weight: 500;
-                padding: 2px 10px;
-                border-radius: 12px;
-              ">
-                ${config.credits} ECTS
-              </span>
-              ${
-                accumulatedPoints >= 5.0
-                  ? `<span style="
-                      font-size: 12px;
-                      background: rgba(129, 201, 149, 0.15);
-                      color: #81c995;
-                      border: 1px solid rgba(129, 201, 149, 0.3);
-                      font-weight: 600;
-                      padding: 2px 10px;
-                      border-radius: 12px;
-                    ">
-                      🎉 Aprobado Asegurado
-                    </span>`
-                  : `<span style="
-                      font-size: 12px;
-                      background: rgba(138, 180, 248, 0.12);
-                      color: var(--gcal-accent, #8ab4f8);
-                      border: 1px solid rgba(138, 180, 248, 0.25);
-                      font-weight: 500;
-                      padding: 2px 10px;
-                      border-radius: 12px;
-                    ">
-                      Faltan ${(5.0 - accumulatedPoints).toFixed(2)} pts para 5.0
-                    </span>`
-              }
+      <div class="cg-header">
+        <div class="cg-header-left">
+          <div class="cg-subject-accent" style="background: ${subjColor};"></div>
+          <div style="min-width: 0;">
+            <div class="cg-subject-title-row">
+              <h1 class="cg-subject-title">${escapeHtml(config.subjectName)}</h1>
+              <label class="cg-ects-chip" title="Créditos ECTS de la asignatura">
+                <input id="cursa-credits-input" class="cg-ects-input cg-num" type="number" min="1" max="30" step="0.5" value="${config.credits || 6}" />
+                <span>ECTS</span>
+              </label>
+              <span id="cg-header-status-pill">${statusBadge}</span>
             </div>
-            <div style="font-size: 13px; color: var(--gcal-secondary-text, #9aa0a6); margin-top: 3px;">
-              Puntuación asegurada: <strong style="color: var(--gcal-accent, #8ab4f8); font-weight: 600;">${accumulatedPoints.toFixed(2)} pts</strong> de 10 • ${gradedWeight}% evaluado del curso
+            <div class="cg-subject-subtitle" id="cg-header-subtitle">
+              <span><strong>${acc.accumulatedPoints.toFixed(2)}</strong> pts asegurados</span>
+              <span>·</span>
+              <span>Media actual: <strong>${acc.currentAverage !== null ? acc.currentAverage.toFixed(2) : '—'}</strong> (${acc.gradedWeight}% evaluado)</span>
+              <span>·</span>
+              <span>Máx. posible: <strong>${acc.maxPossibleGrade.toFixed(2)}</strong></span>
             </div>
           </div>
         </div>
 
-        <!-- Action Toolbar -->
-        <div style="display: flex; align-items: center; gap: 10px;">
-          <button id="cursa-add-item-btn" type="button" style="
-            background: var(--gcal-surface-hover, #35373b);
-            color: var(--gcal-accent, #8ab4f8);
-            border: 1px solid var(--gcal-border, #444746);
-            padding: 8px 16px;
-            border-radius: 18px;
-            font-size: 13px;
-            font-weight: 500;
-            font-family: 'Google Sans', Roboto, sans-serif;
-            cursor: pointer;
-            display: flex;
-            align-items: center;
-            gap: 6px;
-            transition: all 0.15s ease;
-          " onmouseover="this.style.background='var(--gcal-selected, #004a77)';" onmouseout="this.style.background='var(--gcal-surface-hover, #35373b)';">
-            <span style="font-size: 15px; font-weight: 700;">+</span>
-            <span>Añadir Hito</span>
+        <div class="cg-header-actions">
+          <button id="cursa-add-block-btn" type="button" class="cg-btn">
+            ${GRADES_ICONS.layers(14)}
+            <span>+ Bloque</span>
           </button>
-
-          <button id="cursa-reconfigure-ai-btn" type="button" style="
-            background: linear-gradient(135deg, #1a73e8 0%, #4285f4 50%, #9b72cb 100%);
-            color: #ffffff;
-            border: none;
-            padding: 8px 18px;
-            border-radius: 18px;
-            font-size: 13px;
-            font-weight: 500;
-            font-family: 'Google Sans', Roboto, sans-serif;
-            cursor: pointer;
-            display: flex;
-            align-items: center;
-            gap: 8px;
-            box-shadow: 0 1px 4px rgba(0,0,0,0.25);
-            transition: opacity 0.15s ease;
-          " onmouseover="this.style.opacity='0.9';" onmouseout="this.style.opacity='1';">
-            <span>✨</span>
-            <span>Asistente Gemini</span>
+          <button id="cursa-add-item-btn" type="button" class="cg-btn">
+            ${GRADES_ICONS.plus(14)}
+            <span>Añadir hito</span>
           </button>
-
-          <button id="cursa-delete-grades-btn" type="button" style="
-            background: transparent;
-            color: var(--gcal-secondary-text, #9aa0a6);
-            border: 1px solid transparent;
-            width: 36px;
-            height: 36px;
-            border-radius: 50%;
-            font-size: 16px;
-            cursor: pointer;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            transition: all 0.15s ease;
-          " onmouseover="this.style.background='rgba(242, 139, 130, 0.15)'; this.style.color='#f28b82';" onmouseout="this.style.background='transparent'; this.style.color='var(--gcal-secondary-text, #9aa0a6)';" title="Borrar datos de esta materia">
-            🗑️
+          <button id="cursa-reconfigure-ai-btn" type="button" class="cg-btn cg-btn-ai">
+            ${GRADES_ICONS.sparkles(14)}
+            <span>Asistente IA</span>
+          </button>
+          <button id="cursa-delete-grades-btn" type="button" class="cg-btn cg-btn-danger-ghost" title="Borrar configuración de esta asignatura">
+            ${GRADES_ICONS.trash(15)}
           </button>
         </div>
       </div>
     `;
   }
 
-  private renderProgressCard(accumulatedPoints: number, gradedWeight: number): string {
+  private renderDeleteConfirmBar(subjectName: string): string {
     return `
-      <!-- HUD 1: Progreso Actual y Nota Acumulada -->
-      <div style="
-        background: var(--gcal-surface, #282a2d);
-        border: 1px solid var(--gcal-border, #444746);
-        border-radius: 16px;
-        padding: 16px 20px;
-        box-shadow: 0 1px 4px rgba(0,0,0,0.18);
-        display: flex;
-        flex-direction: column;
-        justify-content: space-between;
-      ">
+      <div class="cg-confirm-bar">
+        <div style="display: flex; align-items: center; gap: 8px;">
+          ${GRADES_ICONS.alertTriangle(15)}
+          <span>¿Seguro que quieres borrar todas las notas y la estructura de <strong>${escapeHtml(subjectName)}</strong>?</span>
+        </div>
+        <div style="display: flex; gap: 8px;">
+          <button id="cursa-confirm-delete-cancel" type="button" class="cg-btn cg-btn-sm">Cancelar</button>
+          <button id="cursa-confirm-delete-yes" type="button" class="cg-btn cg-btn-sm" style="background: var(--cg-danger); color: #fff; border-color: transparent;">
+            Borrar definitivamente
+          </button>
+        </div>
+      </div>
+    `;
+  }
+
+  private renderProgressCard(
+    acc: ReturnType<typeof calculateAccumulatedScore>,
+    groups: GradeGroup[]
+  ): string {
+    const segmentsHtml = groups
+      .map((g, i) => {
+        const pct = Math.min(100, Math.max(0, g.accumulatedPoints * 10));
+        const color = BLOCK_SEGMENT_COLORS[i % BLOCK_SEGMENT_COLORS.length];
+        return `<div class="cg-progress-seg" style="width: ${pct}%; background: ${color};" title="${escapeHtml(g.name)}: +${g.accumulatedPoints.toFixed(2)} pts"></div>`;
+      })
+      .join('');
+
+    return `
+      <div class="cg-card" id="cg-card-progress">
+        <div class="cg-card-top">
+          <span class="cg-card-label">${GRADES_ICONS.layers(14)} Estado actual</span>
+          <span class="cg-pill cg-pill-neutral cg-num">${acc.gradedWeight}% evaluado</span>
+        </div>
+
         <div>
-          <div style="
-            font-size: 11px;
-            font-weight: 600;
-            letter-spacing: 0.8px;
-            text-transform: uppercase;
-            color: var(--gcal-secondary-text, #9aa0a6);
-            display: flex;
-            align-items: center;
-            gap: 6px;
-          ">
-            <span>📊</span> <span>Progreso Global</span>
+          <div class="cg-big-value">
+            <span style="color: var(--cg-accent);">${acc.accumulatedPoints.toFixed(2)}</span>
+            <span class="cg-big-unit">/ 10 pts asegurados</span>
           </div>
-          <div style="
-            font-size: 32px;
-            font-weight: 500;
-            font-family: 'Google Sans', Roboto, sans-serif;
-            color: var(--gcal-accent, #8ab4f8);
-            line-height: 1.15;
-            margin: 6px 0 2px 0;
-          ">
-            ${accumulatedPoints.toFixed(2)}
-            <span style="font-size: 14px; font-weight: 400; color: var(--gcal-secondary-text, #9aa0a6);">/ 10 pts</span>
-          </div>
-          <div style="font-size: 12px; color: var(--gcal-secondary-text, #9aa0a6);">
-            Puntos asegurados (${gradedWeight}% evaluado)
+          <div class="cg-meta-row" style="margin-top: 6px;">
+            <span>Media evaluada: <strong class="cg-num">${acc.currentAverage !== null ? acc.currentAverage.toFixed(2) : '—'}</strong></span>
+            <span>Máx. alcanzable: <strong class="cg-num">${acc.maxPossibleGrade.toFixed(2)}</strong></span>
           </div>
         </div>
 
-        <div style="margin-top: 12px;">
-          <div style="
-            width: 100%;
-            height: 6px;
-            background: var(--gcal-surface-hover, #35373b);
-            border-radius: 3px;
-            overflow: hidden;
-            position: relative;
-          ">
-            <div style="
-              width: ${Math.min(100, (accumulatedPoints / 10) * 100)}%;
-              height: 100%;
-              background: ${accumulatedPoints >= 5.0 ? '#81c995' : 'var(--gcal-accent, #8ab4f8)'};
-              border-radius: 3px;
-              transition: width 0.3s ease;
-            "></div>
-            <div style="
-              position: absolute;
-              left: 50%;
-              top: 0;
-              width: 2px;
-              height: 100%;
-              background: rgba(255,255,255,0.3);
-            " title="Corte de Aprobado (5.0)"></div>
+        <div>
+          <div class="cg-progress-track">
+            ${segmentsHtml}
+            <div class="cg-progress-marker" title="Aprobado (5.0)"></div>
           </div>
-
-          <div style="
-            margin-top: 8px;
-            display: flex;
-            align-items: center;
-            justify-content: space-between;
-            font-size: 11.5px;
-          ">
-            ${
-              accumulatedPoints >= 5.0
-                ? `<span style="background: rgba(129, 201, 149, 0.15); color: #81c995; border: 1px solid rgba(129, 201, 149, 0.3); font-weight: 600; padding: 1px 8px; border-radius: 8px;">
-                    🎉 ¡Aprobado asegurado!
-                  </span>`
-                : `<span style="color: var(--gcal-secondary-text, #9aa0a6);">
-                    Faltan <strong style="color: var(--gcal-text, #e8eaed);">${(5.0 - accumulatedPoints).toFixed(2)} pts</strong> para el 5.0
-                  </span>`
-            }
-            <span style="color: var(--gcal-secondary-text, #9aa0a6); font-size: 11px;">Meta: 5.0 min</span>
+          <div class="cg-meta-row" style="margin-top: 7px; font-size: 11.5px;">
+            <span>${acc.accumulatedPoints >= 5.0 ? 'Umbral de 5.0 superado' : `Faltan ${(5.0 - acc.accumulatedPoints).toFixed(2)} pts para 5.0`}</span>
+            <span>Línea: 5.0</span>
           </div>
         </div>
       </div>
     `;
   }
 
-  private renderTargetCard(
-    targetCalc: ReturnType<typeof calculateTargetRequiredGrade>,
-    targetStatus: { targetStatusColor: string; targetStatusBg: string; targetStatusBorder: string; targetStatusLabel: string }
-  ): string {
+  private renderTargetCard(targetCalc: ReturnType<typeof calculateTargetRequiredGrade>): string {
+    let pillClass = 'cg-pill-success';
+    let pillText = 'Factible';
+    let valueColor = 'var(--cg-success)';
+
+    if (!targetCalc.isPossible) {
+      pillClass = 'cg-pill-danger';
+      pillText = 'Inalcanzable';
+      valueColor = 'var(--cg-danger)';
+    } else if (targetCalc.requiredFinalGrade > 8.5) {
+      pillClass = 'cg-pill-warn';
+      pillText = 'Muy exigente';
+      valueColor = 'var(--cg-warn)';
+    } else if (targetCalc.requiredFinalGrade > 6.5) {
+      pillClass = 'cg-pill-accent';
+      pillText = 'Exigente';
+      valueColor = 'var(--cg-accent)';
+    }
+
+    const targets = [5.0, 7.0, 9.0];
+    const buttonsHtml = targets
+      .map(
+        (t) =>
+          `<button type="button" class="cg-seg-btn cursa-target-btn ${this.currentTarget === t ? 'active' : ''}" data-target="${t.toFixed(1)}">${t.toFixed(1)}</button>`
+      )
+      .join('');
+
     return `
-      <!-- HUD 2: Calculadora de Objetivo ("¿Qué necesito sacar?") -->
-      <div style="
-        background: var(--gcal-surface, #282a2d);
-        border: 1px solid var(--gcal-border, #444746);
-        border-radius: 16px;
-        padding: 16px 20px;
-        box-shadow: 0 1px 4px rgba(0,0,0,0.18);
-        display: flex;
-        flex-direction: column;
-        justify-content: space-between;
-      ">
-        <div>
-          <div style="display: flex; justify-content: space-between; align-items: center;">
-            <div style="
-              font-size: 11px;
-              font-weight: 600;
-              letter-spacing: 0.8px;
-              text-transform: uppercase;
-              color: var(--gcal-secondary-text, #9aa0a6);
-              display: flex;
-              align-items: center;
-              gap: 6px;
-            ">
-              <span>🎯</span> <span>Objetivo de Nota</span>
-            </div>
-
-            <!-- Quick Target Pills -->
-            <div style="display: flex; gap: 5px;">
-              <button type="button" class="cursa-target-btn ${this.currentTarget === 5.0 ? 'active' : ''}" data-target="5.0" style="
-                padding: 2px 8px;
-                border-radius: 10px;
-                border: 1px solid ${this.currentTarget === 5.0 ? 'var(--gcal-accent, #8ab4f8)' : 'var(--gcal-border, #444746)'};
-                background: ${this.currentTarget === 5.0 ? 'rgba(138, 180, 248, 0.18)' : 'transparent'};
-                color: ${this.currentTarget === 5.0 ? 'var(--gcal-accent, #8ab4f8)' : 'var(--gcal-secondary-text, #9aa0a6)'};
-                font-weight: 600;
-                font-size: 11px;
-                cursor: pointer;
-                transition: all 0.15s ease;
-              ">5.0</button>
-              <button type="button" class="cursa-target-btn ${this.currentTarget === 7.0 ? 'active' : ''}" data-target="7.0" style="
-                padding: 2px 8px;
-                border-radius: 10px;
-                border: 1px solid ${this.currentTarget === 7.0 ? 'var(--gcal-accent, #8ab4f8)' : 'var(--gcal-border, #444746)'};
-                background: ${this.currentTarget === 7.0 ? 'rgba(138, 180, 248, 0.18)' : 'transparent'};
-                color: ${this.currentTarget === 7.0 ? 'var(--gcal-accent, #8ab4f8)' : 'var(--gcal-secondary-text, #9aa0a6)'};
-                font-weight: 600;
-                font-size: 11px;
-                cursor: pointer;
-                transition: all 0.15s ease;
-              ">7.0</button>
-              <button type="button" class="cursa-target-btn ${this.currentTarget === 9.0 ? 'active' : ''}" data-target="9.0" style="
-                padding: 2px 8px;
-                border-radius: 10px;
-                border: 1px solid ${this.currentTarget === 9.0 ? 'var(--gcal-accent, #8ab4f8)' : 'var(--gcal-border, #444746)'};
-                background: ${this.currentTarget === 9.0 ? 'rgba(138, 180, 248, 0.18)' : 'transparent'};
-                color: ${this.currentTarget === 9.0 ? 'var(--gcal-accent, #8ab4f8)' : 'var(--gcal-secondary-text, #9aa0a6)'};
-                font-weight: 600;
-                font-size: 11px;
-                cursor: pointer;
-                transition: all 0.15s ease;
-              ">9.0</button>
-            </div>
-          </div>
-
-          <div style="
-            font-size: ${targetCalc.isPossible ? '32px' : '22px'};
-            font-weight: 500;
-            font-family: 'Google Sans', Roboto, sans-serif;
-            color: ${targetStatus.targetStatusColor};
-            line-height: 1.15;
-            margin: 6px 0 2px 0;
-          ">
-            ${targetCalc.isPossible ? targetCalc.requiredFinalGrade.toFixed(2) : 'Inalcanzable'}
-            ${targetCalc.isPossible ? '<span style="font-size: 13px; font-weight: 400; color: var(--gcal-secondary-text, #9aa0a6);">en pendientes</span>' : ''}
-          </div>
-
-          <div style="font-size: 12px; color: var(--gcal-secondary-text, #9aa0a6);">
-            Para obtener un <strong style="color: var(--gcal-text, #e8eaed);">${this.currentTarget.toFixed(1)}</strong> final
-          </div>
+      <div class="cg-card" id="cg-card-target">
+        <div class="cg-card-top">
+          <span class="cg-card-label">${GRADES_ICONS.target(14)} Meta de nota</span>
+          <div class="cg-seg-group">${buttonsHtml}</div>
         </div>
 
-        <div style="margin-top: 10px;">
-          <div style="display: flex; align-items: center; justify-content: space-between;">
-            <span style="
-              background: ${targetStatus.targetStatusBg};
-              color: ${targetStatus.targetStatusColor};
-              border: 1px solid ${targetStatus.targetStatusBorder};
-              font-weight: 600;
-              font-size: 11px;
-              padding: 2px 8px;
-              border-radius: 8px;
-              display: inline-block;
-            ">
-              ${targetStatus.targetStatusLabel}
+        <div>
+          <div class="cg-big-value">
+            <span style="color: ${valueColor};">
+              ${targetCalc.remainingWeightTotal === 0 ? targetCalc.accumulatedPoints.toFixed(2) : targetCalc.isPossible ? targetCalc.requiredFinalGrade.toFixed(2) : 'Inalcanzable'}
             </span>
-
             ${
-              targetCalc.isCutoffTriggered
-                ? `<span style="font-size: 11px; color: #fdd663; font-weight: 500;">
-                    🛡️ Corte de ${targetCalc.minCutoff?.toFixed(2)}
-                  </span>`
+              targetCalc.remainingWeightTotal > 0 && targetCalc.isPossible
+                ? `<span class="cg-big-unit">en el ${targetCalc.remainingWeightTotal}% restante</span>`
+                : targetCalc.remainingWeightTotal === 0
+                  ? `<span class="cg-big-unit">nota final</span>`
+                  : ''
+            }
+          </div>
+          <div style="font-size: 12px; color: var(--cg-muted); margin-top: 6px;">
+            Para alcanzar un <strong style="color: var(--cg-text);">${this.currentTarget.toFixed(1)}</strong> final
+            ${
+              targetCalc.isCutoffTriggered && typeof targetCalc.rawRequiredForAverage === 'number'
+                ? ` <span style="opacity: 0.85;">(media pura: ${targetCalc.rawRequiredForAverage.toFixed(2)})</span>`
                 : ''
             }
           </div>
         </div>
+
+        <div class="cg-meta-row">
+          <span class="cg-pill ${pillClass}">${pillText}</span>
+          ${
+            targetCalc.bottleneckReason
+              ? `<span style="font-size: 11.5px; color: ${targetCalc.isPossible ? 'var(--cg-warn)' : 'var(--cg-danger)'}; font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 65%;" title="${escapeHtml(targetCalc.bottleneckReason)}">${escapeHtml(targetCalc.bottleneckReason)}</span>`
+              : `<span style="font-size: 11.5px;">Sin cortes bloqueantes</span>`
+          }
+        </div>
       </div>
     `;
   }
 
-  private renderSimulatorCard(
-    simResult: ReturnType<typeof calculateSimulatedFinalGrade>,
-    simStatus: { simStatusColor: string; simStatusBg: string; simStatusBorder: string; simStatusLabel: string }
-  ): string {
+  private renderScenarioCard(sim: ReturnType<typeof calculateScenarioSimulation>): string {
+    let pillClass = 'cg-pill-success';
+    let pillText = 'Aprobado';
+    let valueColor = 'var(--cg-success)';
+
+    if (sim.isCutoffFailed) {
+      pillClass = 'cg-pill-danger';
+      pillText = sim.failedBlockCutoff ? `Corte: ${sim.failedBlockCutoff}` : 'Corte no superado';
+      valueColor = 'var(--cg-danger)';
+    } else if (sim.finalGrade >= 9.0) {
+      pillClass = 'cg-pill-success';
+      pillText = 'Sobresaliente';
+      valueColor = 'var(--cg-success)';
+    } else if (sim.finalGrade >= 7.0) {
+      pillClass = 'cg-pill-accent';
+      pillText = 'Notable';
+      valueColor = 'var(--cg-accent)';
+    } else if (sim.finalGrade >= 5.0) {
+      pillClass = 'cg-pill-success';
+      pillText = 'Aprobado';
+      valueColor = 'var(--cg-success)';
+    } else {
+      pillClass = 'cg-pill-danger';
+      pillText = 'Suspenso (< 5.0)';
+      valueColor = 'var(--cg-danger)';
+    }
+
+    const hasPerItemSim = sim.simulatedItemCount > 0;
+
     return `
-      <!-- HUD 3: Simulador de Escenario en Tiempo Real -->
-      <div style="
-        background: var(--gcal-surface, #282a2d);
-        border: 1px solid var(--gcal-border, #444746);
-        border-radius: 16px;
-        padding: 16px 20px;
-        box-shadow: 0 1px 4px rgba(0,0,0,0.18);
-        display: flex;
-        flex-direction: column;
-        justify-content: space-between;
-      ">
+      <div class="cg-card" id="cg-card-scenario">
+        <div class="cg-card-top">
+          <span class="cg-card-label">${GRADES_ICONS.sliders(14)} Simulador What-If</span>
+          <span id="cursa-sim-status-badge" class="cg-pill ${pillClass}" style="max-width: 190px; overflow: hidden; text-overflow: ellipsis;" title="${escapeHtml(pillText)}">${escapeHtml(pillText)}</span>
+        </div>
+
         <div>
-          <div style="display: flex; justify-content: space-between; align-items: center;">
-            <div style="
-              font-size: 11px;
-              font-weight: 600;
-              letter-spacing: 0.8px;
-              text-transform: uppercase;
-              color: var(--gcal-secondary-text, #9aa0a6);
-              display: flex;
-              align-items: center;
-              gap: 6px;
-            ">
-              <span>🎚️</span> <span>Simulador de Escenario</span>
-            </div>
-            <span id="cursa-sim-status-badge" style="
-              background: ${simStatus.simStatusBg};
-              color: ${simStatus.simStatusColor};
-              border: 1px solid ${simStatus.simStatusBorder};
-              font-weight: 600;
-              font-size: 11px;
-              padding: 1px 8px;
-              border-radius: 8px;
-            ">${simStatus.simStatusLabel}</span>
+          <div class="cg-big-value" id="cursa-sim-final-grade-box" style="color: ${valueColor};">
+            <span id="cursa-sim-final-grade-val">${sim.finalGrade.toFixed(2)}</span>
+            <span class="cg-big-unit">nota proyectada</span>
           </div>
-
-          <div id="cursa-sim-final-grade-box" style="
-            font-size: 32px;
-            font-weight: 500;
-            font-family: 'Google Sans', Roboto, sans-serif;
-            color: ${simStatus.simStatusColor};
-            line-height: 1.15;
-            margin: 6px 0 2px 0;
-          ">
-            <span id="cursa-sim-final-grade-val">${simResult.finalGrade.toFixed(2)}</span>
-            <span style="font-size: 13px; font-weight: 400; color: var(--gcal-secondary-text, #9aa0a6);">Nota Final Estimada</span>
-          </div>
-
-          <div style="font-size: 12px; color: var(--gcal-secondary-text, #9aa0a6);">
-            Si en el resto obtienes: <strong id="cursa-sim-score-val" style="color: var(--gcal-accent, #8ab4f8);">${this.simulatedScore.toFixed(1)}</strong>
+          <div class="cg-meta-row" style="margin-top: 6px;">
+            <span>
+              ${
+                hasPerItemSim
+                  ? `<strong style="color: var(--cg-sim);">${sim.simulatedItemCount} sim. manual${sim.simulatedItemCount > 1 ? 'es' : ''}</strong>${sim.pendingUnfilledCount > 0 ? ` · resto a <strong id="cursa-sim-score-val">${this.fallbackSimScore.toFixed(1)}</strong>` : ''}`
+                  : `Resto pendiente a: <strong id="cursa-sim-score-val" style="color: var(--cg-sim);">${this.fallbackSimScore.toFixed(1)}</strong>`
+              }
+            </span>
+            ${
+              hasPerItemSim
+                ? `<div style="display: inline-flex; gap: 6px;">
+                    <button type="button" id="cursa-clear-sim-btn" class="cg-btn cg-btn-sm cg-btn-ghost" style="height: 22px; padding: 0 6px;" title="Limpiar notas simuladas">
+                      ${GRADES_ICONS.rotateCcw(12)} Limpiar
+                    </button>
+                    <button type="button" id="cursa-commit-sim-btn" class="cg-btn cg-btn-sm" style="height: 22px; padding: 0 7px; color: var(--cg-sim); border-color: var(--cg-sim-border);" title="Convertir simuladas en notas reales">
+                      ${GRADES_ICONS.check(12)} Fijar
+                    </button>
+                  </div>`
+                : ''
+            }
           </div>
         </div>
 
-        <div style="margin-top: 10px;">
-          <input id="cursa-sim-slider" type="range" min="0" max="10" step="0.1" value="${this.simulatedScore}" style="
-            width: 100%;
-            height: 5px;
-            border-radius: 3px;
-            accent-color: var(--gcal-accent, #8ab4f8);
-            cursor: pointer;
-          " />
-          <div style="display: flex; justify-content: space-between; font-size: 10px; color: var(--gcal-secondary-text, #9aa0a6); margin-top: 2px;">
+        <div>
+          <input id="cursa-sim-slider" class="cg-slider" type="range" min="0" max="10" step="0.1" value="${this.fallbackSimScore}" />
+          <div class="cg-meta-row" style="font-size: 10.5px; margin-top: 2px;">
             <span>0.0</span>
             <span>5.0</span>
             <span>10.0</span>
@@ -824,657 +689,496 @@ private getTargetStatusColors(targetCalc: ReturnType<typeof calculateTargetRequi
     `;
   }
 
-  private renderOutlinerSection(
+  private renderCutoffsStrip(diagnostics: CutoffDiagnostic[]): string {
+    if (!diagnostics || diagnostics.length === 0) return '';
+
+    const chips = diagnostics
+      .map((d) => {
+        let cls = 'cg-pill-neutral';
+        let icon = GRADES_ICONS.shield(12);
+        let detail = `mín. ${d.required.toFixed(1)}`;
+
+        if (d.status === 'MET') {
+          cls = 'cg-pill-success';
+          icon = GRADES_ICONS.shieldCheck(12);
+          detail = d.currentScore !== null ? `${d.currentScore.toFixed(2)} ≥ ${d.required.toFixed(1)}` : `OK (≥ ${d.required.toFixed(1)})`;
+        } else if (d.status === 'FAILED' || d.status === 'IMPOSSIBLE') {
+          cls = 'cg-pill-danger';
+          icon = GRADES_ICONS.shieldAlert(12);
+          detail = d.status === 'IMPOSSIBLE' ? `inalcanzable (< ${d.required.toFixed(1)})` : `${d.currentScore?.toFixed(2) ?? '—'} < ${d.required.toFixed(1)}`;
+        } else if (d.status === 'AT_RISK') {
+          cls = 'cg-pill-warn';
+          icon = GRADES_ICONS.shieldAlert(12);
+          detail = `sim. ${d.projectedScore?.toFixed(2) ?? '—'} < ${d.required.toFixed(1)}`;
+        } else if (d.requiredInPending !== null) {
+          cls = 'cg-pill-warn';
+          detail = `necesitas ${d.requiredInPending.toFixed(2)} (mín. ${d.required.toFixed(1)})`;
+        }
+
+        return `<span class="cg-pill ${cls} cg-num">${icon} <span>${escapeHtml(d.label)}:</span> <strong>${detail}</strong></span>`;
+      })
+      .join('');
+
+    return `
+      <div class="cg-cutoffs-strip">
+        <span class="cg-cutoffs-title">${GRADES_ICONS.shield(13)} Reglas de corte activas:</span>
+        ${chips}
+      </div>
+    `;
+  }
+
+  private renderTreeToolbar(
     groups: GradeGroup[],
     config: SubjectGradesConfig,
-    allExpanded: boolean,
-    totalWeight: number,
-    isSum100: boolean
+    allExpanded: boolean
   ): string {
     return `
-      <!-- Outliner Control Bar (Estructura 6 Notion/Things Tree Header) -->
-      <div style="
-        display: flex;
-        justify-content: space-between;
-        align-items: center;
-        padding: 4px 6px;
-        margin-top: 4px;
-      ">
-        <div style="display: flex; align-items: center; gap: 10px;">
-          <span style="
-            font-family: 'Google Sans', Roboto, sans-serif;
-            font-weight: 600;
-            font-size: 15px;
-            color: var(--gcal-text, #e8eaed);
-            display: flex;
-            align-items: center;
-            gap: 8px;
-          ">
-            <span>🌲</span>
-            <span>Árbol de Evaluación por Bloques y Temas</span>
+      <div class="cg-tree-toolbar">
+        <div class="cg-tree-toolbar-left">
+          <span class="cg-section-title">
+            ${GRADES_ICONS.layers(15)}
+            <span>Desglose de evaluación</span>
           </span>
-          <span style="
-            font-size: 12px;
-            background: var(--gcal-surface-hover, #35373b);
-            color: var(--gcal-secondary-text, #9aa0a6);
-            border: 1px solid var(--gcal-border, #444746);
-            padding: 2px 10px;
-            border-radius: 12px;
-            font-weight: 500;
-          ">
-            ${groups.length} ${groups.length === 1 ? 'bloque' : 'bloques'} • ${config.items.length} hitos
-          </span>
+          <span class="cg-pill cg-pill-neutral">${groups.length} ${groups.length === 1 ? 'bloque' : 'bloques'} · ${config.items.length} hitos</span>
         </div>
 
-        <div style="display: flex; align-items: center; gap: 14px;">
-          <!-- Cutoff Setting -->
-          <div style="display: flex; align-items: center; gap: 8px; font-size: 12.5px; color: var(--gcal-secondary-text, #9aa0a6);">
-            <span>🛡️ Corte examen final:</span>
-            <input id="cursa-cutoff-input" type="number" step="0.25" min="0" max="10" placeholder="Sin corte" value="${config.minFinalGradeRequired || ''}" style="
-              width: 76px;
-              padding: 4px 8px;
-              border-radius: 8px;
-              border: 1px solid var(--gcal-border, #444746);
-              background: var(--gcal-surface, #282a2d);
-              color: var(--gcal-text, #e8eaed);
-              font-size: 12.5px;
-              font-weight: 600;
-              text-align: center;
-              outline: none;
-              transition: border-color 0.15s ease;
-            " onfocus="this.style.borderColor='var(--gcal-accent, #8ab4f8)';" onblur="this.style.borderColor='var(--gcal-border, #444746)';" />
-          </div>
+        <div class="cg-tree-toolbar-right">
+          <label class="cg-inline-field" title="Corte global opcional para el examen final">
+            ${GRADES_ICONS.shield(13)}
+            <span>Corte final:</span>
+            <input id="cursa-cutoff-input" type="number" step="0.25" min="0" max="10" placeholder="—" value="${config.minFinalGradeRequired ?? ''}" />
+          </label>
 
-          <!-- Expand / Collapse All Accordions -->
-          <button id="cursa-toggle-all-groups-btn" type="button" style="
-            background: var(--gcal-surface, #282a2d);
-            border: 1px solid var(--gcal-border, #444746);
-            color: var(--gcal-secondary-text, #9aa0a6);
-            padding: 5px 12px;
-            border-radius: 12px;
-            font-size: 12px;
-            font-weight: 500;
-            font-family: 'Google Sans', Roboto, sans-serif;
-            cursor: pointer;
-            display: flex;
-            align-items: center;
-            gap: 6px;
-            transition: all 0.15s ease;
-          " onmouseover="this.style.background='var(--gcal-surface-hover, #35373b)'; this.style.color='var(--gcal-text, #e8eaed)';" onmouseout="this.style.background='var(--gcal-surface, #282a2d)'; this.style.color='var(--gcal-secondary-text, #9aa0a6)';">
-            <span>${allExpanded ? '▶' : '▼'}</span>
-            <span>${allExpanded ? 'Contraer todos' : 'Desplegar todos'}</span>
+          <button id="cursa-toggle-all-groups-btn" type="button" class="cg-btn cg-btn-sm">
+            ${allExpanded ? 'Contraer bloques' : 'Desplegar bloques'}
           </button>
-        </div>
-      </div>
-
-      <!-- Outliner Blocks Stack (Option 6 Nested Outliner) -->
-      <div style="display: flex; flex-direction: column; gap: 14px;">
-        ${groups.map((group) => this.renderOutlinerBlock(group)).join('')}
-      </div>
-
-      <!-- Global Weight Summary Footer -->
-      <div style="
-        background: var(--gcal-surface, #282a2d);
-        border: 1px solid var(--gcal-border, #444746);
-        border-radius: 14px;
-        padding: 14px 20px;
-        display: flex;
-        justify-content: space-between;
-        align-items: center;
-        font-size: 12.5px;
-        box-shadow: 0 1px 3px rgba(0,0,0,0.18);
-      ">
-        <div style="display: flex; align-items: center; gap: 10px;">
-          <span style="font-weight: 500; color: var(--gcal-text, #e8eaed);">Ponderación Global Total:</span>
-          <span style="
-            font-weight: 700;
-            font-family: 'Google Sans', Roboto, sans-serif;
-            color: ${isSum100 ? '#81c995' : '#fdd663'};
-          ">${totalWeight}%</span>
-          <span style="
-            background: ${isSum100 ? 'rgba(129, 201, 149, 0.15)' : 'rgba(253, 214, 99, 0.15)'};
-            color: ${isSum100 ? '#81c995' : '#fdd663'};
-            border: 1px solid ${isSum100 ? 'rgba(129, 201, 149, 0.3)' : 'rgba(253, 214, 99, 0.3)'};
-            padding: 2px 8px;
-            border-radius: 8px;
-            font-size: 11.5px;
-            font-weight: 500;
-          ">
-            ${isSum100 ? '✓ Ponderación equilibrada al 100%' : `⚠️ Falta asignar ${(100 - totalWeight).toFixed(1)}%`}
-          </span>
-        </div>
-
-        <div style="font-size: 12px; color: var(--gcal-secondary-text, #9aa0a6);">
-          ${config.items.length} evaluaciones registradas en ${groups.length} bloques
         </div>
       </div>
     `;
   }
 
-  private renderSimulatorContent(): string {
-    if (!this.currentConfig) return '';
+  private renderBlockCard(group: GradeGroup, blockIndex: number): string {
+    const isExpanded = this.expandedGroups.has(group.id);
+    const hasSubgroups =
+      group.subgroups.length > 1 || (group.subgroups.length === 1 && Boolean(group.subgroups[0].name));
+    const barColor = BLOCK_SEGMENT_COLORS[blockIndex % BLOCK_SEGMENT_COLORS.length];
+    const barFillPct = Math.min(100, Math.max(0, group.blockScore * 10));
 
+    let cutoffBadge = '';
+    if (typeof group.minGradeRequired === 'number') {
+      if (group.isCutoffMet) {
+        cutoffBadge = `<span class="cg-pill cg-pill-success">${GRADES_ICONS.check(11)} Corte OK</span>`;
+      } else if (group.isCutoffImpossible) {
+        cutoffBadge = `<span class="cg-pill cg-pill-danger">Corte imposible</span>`;
+      } else if (typeof group.requiredGradeInPending === 'number') {
+        cutoffBadge = `<span class="cg-pill cg-pill-warn cg-num">Nec. ${group.requiredGradeInPending.toFixed(2)} para corte</span>`;
+      }
+    }
+
+    return `
+      <section class="cg-block ${isExpanded ? 'expanded' : ''}" data-group-id="${group.id}" data-group-name="${escapeHtml(group.name)}">
+        <div class="cg-block-header cursa-accordion-header" data-group-id="${group.id}">
+          <div class="cg-block-left">
+            <span class="cg-chevron">${GRADES_ICONS.chevronDown(15)}</span>
+            <span class="cg-tab-dot" style="background: ${barColor}; width: 9px; height: 9px;"></span>
+            <input type="text" class="cg-block-name-input cursa-block-rename-input" data-old-group="${escapeHtml(group.name)}" value="${escapeHtml(group.name)}" title="Renombrar bloque" />
+            <span class="cg-pill cg-pill-accent cg-num">${group.totalWeight}%</span>
+            ${cutoffBadge}
+          </div>
+
+          <div class="cg-block-right">
+            <label class="cg-inline-field" style="height: 26px; padding: 0 8px; font-size: 11.5px;" title="Nota mínima obligatoria en este bloque">
+              ${GRADES_ICONS.shield(12)}
+              <span>Mín:</span>
+              <input type="number" step="0.25" min="0" max="10" placeholder="—" class="cursa-block-cutoff-input" data-group="${escapeHtml(group.name)}" value="${group.minGradeRequired ?? ''}" style="width: 36px; font-size: 11.5px;" />
+            </label>
+
+            <div class="cg-block-metrics">
+              <span class="cg-block-metric" title="Media actual de los hitos ya evaluados en este bloque">
+                Media: <strong>${group.internalScore !== null ? group.internalScore.toFixed(2) : '—'}</strong>
+              </span>
+              <span class="cg-block-metric" title="Puntos asegurados aportados a la nota final">
+                Aporte: <strong style="color: var(--cg-success);">+${group.accumulatedPoints.toFixed(2)}</strong>
+              </span>
+            </div>
+
+            <button type="button" class="cg-btn cg-btn-sm cg-btn-ghost cursa-add-subgroup-btn" data-group="${escapeHtml(group.name)}" title="Añadir subtema a este bloque">
+              ${GRADES_ICONS.folder(13)} + Tema
+            </button>
+            <button type="button" class="cg-btn cg-btn-sm cursa-add-to-group-btn" data-group="${escapeHtml(group.name)}">
+              ${GRADES_ICONS.plus(12)} Hito
+            </button>
+          </div>
+        </div>
+
+        <div class="cg-block-bar">
+          <div class="cg-block-bar-fill" style="width: ${barFillPct}%; background: ${barColor};"></div>
+        </div>
+
+        ${
+          isExpanded
+            ? `
+              <div class="cg-block-body">
+                <div class="cg-col-headers">
+                  <span>Tipo</span>
+                  <span>Evaluación</span>
+                  <span class="right">Peso</span>
+                  <span class="center">Corte</span>
+                  <span class="right">Nota / Sim.</span>
+                  <span class="right">Aporte</span>
+                  <span></span>
+                </div>
+
+                ${
+                  hasSubgroups
+                    ? group.subgroups
+                        .map((sub) => this.renderSubtopicSection(sub, group))
+                        .join('')
+                    : group.items.map((itemWrap) => this.renderItemRow(itemWrap, group)).join('')
+                }
+              </div>
+            `
+            : ''
+        }
+      </section>
+    `;
+  }
+
+  private renderSubtopicSection(sub: GradeSubgroup, group: GradeGroup): string {
+    const relInGroup = group.totalWeight > 0 ? Math.round((sub.totalWeight / group.totalWeight) * 1000) / 10 : 0;
+
+    return `
+      <div class="cg-subtopic">
+        <div class="cg-subtopic-header">
+          <div style="display: flex; align-items: center; gap: 8px; flex-wrap: wrap;">
+            <span style="color: var(--cg-muted); display: inline-flex;">${GRADES_ICONS.folder(13)}</span>
+            <input type="text" class="cg-subtopic-name-input cursa-subtopic-rename-input" data-group="${escapeHtml(group.name)}" data-old-sub="${escapeHtml(sub.name)}" value="${escapeHtml(sub.name || 'General')}" title="Renombrar tema" />
+            <span class="cg-pill cg-pill-neutral cg-num" style="font-size: 11px; padding: 1px 7px;">
+              ${sub.totalWeight}% global · ${relInGroup}% del bloque
+            </span>
+          </div>
+          <div style="display: flex; align-items: center; gap: 10px;">
+            <span class="cg-num" style="font-size: 12px; color: var(--cg-muted);">
+              Media: <strong style="color: var(--cg-text);">${sub.internalScore !== null ? sub.internalScore.toFixed(2) : '—'}</strong>
+            </span>
+            <button type="button" class="cg-btn cg-btn-sm cg-btn-ghost cursa-add-to-subgroup-btn" data-group="${escapeHtml(group.name)}" data-sub="${escapeHtml(sub.name)}">
+              ${GRADES_ICONS.plus(12)} Hito
+            </button>
+          </div>
+        </div>
+        ${sub.items.map((itemWrap) => this.renderItemRow(itemWrap, group, sub)).join('')}
+      </div>
+    `;
+  }
+
+  private renderItemRow(itemWrap: GradeGroupItem, group: GradeGroup, sub?: GradeSubgroup): string {
+    const { item, originalIndex, displayName } = itemWrap;
+    const hasRealGrade = typeof item.grade === 'number' && !isNaN(item.grade);
+    const hasSimGrade = !hasRealGrade && typeof this.simulatedGrades[item.id] === 'number';
+    const isSimEditing = !hasRealGrade && (hasSimGrade || this.simInputModeIds.has(item.id));
+    const effectiveGrade = hasRealGrade ? item.grade! : hasSimGrade ? this.simulatedGrades[item.id] : null;
+    const contrib = effectiveGrade !== null ? ((effectiveGrade * item.weight) / 100).toFixed(2) : '—';
+
+    const hasCutoff = typeof item.minGradeRequired === 'number' && !isNaN(item.minGradeRequired) && item.minGradeRequired > 0;
+    const isItemCutoffFailed = hasCutoff && hasRealGrade && item.grade! < item.minGradeRequired!;
+
+    const relPct =
+      sub && sub.name && sub.totalWeight > 0
+        ? Math.round((item.weight / sub.totalWeight) * 100)
+        : group.totalWeight > 0 && group.name !== 'Evaluación General'
+          ? Math.round((item.weight / group.totalWeight) * 100)
+          : null;
+
+    const rowClasses = ['cg-row'];
+    if (hasSimGrade) rowClasses.push('has-sim');
+    if (isItemCutoffFailed) rowClasses.push('cutoff-failed');
+
+    return `
+      <div class="${rowClasses.join(' ')}" data-idx="${originalIndex}" data-item-id="${escapeHtml(item.id)}">
+        <div>
+          <button type="button" class="cg-type-pill ${item.type} cursa-item-type-pill" data-idx="${originalIndex}" title="Clic para cambiar tipo">
+            ${TYPE_LABELS[item.type]}
+          </button>
+        </div>
+
+        <div class="cg-name-cell">
+          <input type="text" class="cg-name-input cursa-item-name-input" data-idx="${originalIndex}" data-group="${escapeHtml(group.name)}" data-sub="${escapeHtml(sub?.name || '')}" value="${escapeHtml(displayName)}" />
+          ${item.dateHint && !item.linkedCalendarEventId ? `<span class="cg-date-hint">${escapeHtml(item.dateHint)}</span>` : ''}
+          ${
+            item.linkedCalendarEventId
+              ? `<span class="cg-cal-chip" title="${escapeHtml(item.linkedEventTitle || 'Evento vinculado')}">
+                  ${GRADES_ICONS.calendar(11)}
+                  <span class="txt">${escapeHtml(item.linkedEventTitle || 'Evento')}</span>
+                  <button type="button" class="cg-cal-unlink cursa-unlink-btn" data-idx="${originalIndex}" title="Desvincular evento">${GRADES_ICONS.x(11)}</button>
+                </span>`
+              : `<button type="button" class="cg-cal-link-btn cursa-link-cal-btn" data-idx="${originalIndex}" title="Vincular a un evento de Google Calendar">
+                  ${GRADES_ICONS.link(11)}
+                  <span>Vincular</span>
+                </button>`
+          }
+        </div>
+
+        <div class="cg-weight-cell" title="${relPct !== null ? `${relPct}% dentro de ${sub?.name || group.name}` : 'Peso sobre la asignatura'}">
+          <input type="number" min="0" max="100" step="0.5" class="cg-num-input cursa-item-weight-input" data-idx="${originalIndex}" value="${item.weight}" />
+          <span class="cg-unit-suffix">%</span>
+        </div>
+
+        <div style="display: flex; justify-content: center;">
+          <input type="number" min="0" max="10" step="0.25" placeholder="—" class="cg-cutoff-input cursa-item-cutoff-input ${hasCutoff ? 'active' : ''}" data-idx="${originalIndex}" value="${hasCutoff ? item.minGradeRequired : ''}" title="Nota mínima obligatoria en esta prueba" />
+        </div>
+
+        <div class="cg-grade-cell">
+          <input
+            type="number"
+            step="0.05"
+            min="0"
+            max="10"
+            placeholder="${isSimEditing ? 'Sim...' : 'Pend.'}"
+            class="cg-grade-input cursa-item-grade-input ${hasRealGrade ? 'graded' : isSimEditing ? 'simulated' : ''}"
+            data-idx="${originalIndex}"
+            data-item-id="${escapeHtml(item.id)}"
+            data-mode="${isSimEditing ? 'sim' : 'real'}"
+            value="${hasRealGrade ? item.grade : hasSimGrade ? this.simulatedGrades[item.id] : ''}"
+            title="${isSimEditing ? 'Nota simulada (no sobrescribe tus notas reales)' : 'Nota real obtenida (0 - 10)'}"
+          />
+          ${
+            !hasRealGrade
+              ? `<button type="button" class="cg-sim-toggle-btn cursa-sim-mode-btn ${isSimEditing ? 'active' : ''}" data-item-id="${escapeHtml(item.id)}" title="${isSimEditing ? 'Volver a modo nota real' : 'Simular nota hipotética (What-If) sin guardarla como real'}">
+                  ${GRADES_ICONS.flask(13)}
+                </button>`
+              : `<span style="width: 26px; display: inline-block;"></span>`
+          }
+        </div>
+
+        <div class="cg-contrib-cell ${hasRealGrade ? 'graded' : hasSimGrade ? 'simulated' : ''}" data-contrib-for="${escapeHtml(item.id)}">
+          ${effectiveGrade !== null ? `${hasSimGrade ? '~' : '+'}${contrib}` : '—'}
+        </div>
+
+        <div style="display: flex; justify-content: flex-end;">
+          <button type="button" class="cg-row-del-btn cursa-del-item-btn" data-idx="${originalIndex}" title="Eliminar hito">
+            ${GRADES_ICONS.x(13)}
+          </button>
+        </div>
+      </div>
+    `;
+  }
+
+  private renderWeightFooter(
+    totalWeight: number,
+    isSum100: boolean,
+    itemCount: number,
+    groupCount: number
+  ): string {
+    const diff = Math.round((100 - totalWeight) * 10) / 10;
+    const statusText = isSum100
+      ? 'Ponderación equilibrada al 100%'
+      : diff > 0
+        ? `Falta asignar ${diff}%`
+        : `Sobran ${Math.abs(diff)}%`;
+
+    return `
+      <div class="cg-weight-footer">
+        <div style="display: flex; align-items: center; gap: 10px; flex-wrap: wrap;">
+          <span style="color: var(--cg-muted);">Ponderación total:</span>
+          <strong class="cg-num" style="font-size: 14px; color: ${isSum100 ? 'var(--cg-success)' : 'var(--cg-warn)'};">${totalWeight}%</strong>
+          <span class="cg-pill ${isSum100 ? 'cg-pill-success' : 'cg-pill-warn'}">${statusText}</span>
+          ${
+            !isSum100 && itemCount > 0
+              ? `<button type="button" id="cursa-normalize-weights-btn" class="cg-btn cg-btn-sm">
+                  ${GRADES_ICONS.scale(13)} Normalizar al 100%
+                </button>`
+              : ''
+          }
+        </div>
+        <span style="color: var(--cg-muted); font-size: 12px;">
+          ${itemCount} ${itemCount === 1 ? 'hito' : 'hitos'} en ${groupCount} ${groupCount === 1 ? 'bloque' : 'bloques'}
+        </span>
+      </div>
+    `;
+  }
+
+  /**
+   * Surgical live update of KPI cards, cutoffs strip, header subtitle, and weight footer
+   * WITHOUT destroying the active input or losing keyboard focus!
+   */
+  private updateLiveMetricsInPlace(): void {
+    if (!this.containerEl || !this.currentConfig) return;
     const config = this.currentConfig;
-    const adapter = GoogleCalendarAdapter.getInstance();
-    const colorMap = adapter.getSubjectColorMap();
-    const subjColor = adapter.findSubjectColor(this.activeSubject, colorMap);
-
-    const { accumulatedPoints, gradedWeight, totalWeight } = calculateAccumulatedScore(config.items);
-    const isSum100 = totalWeight === 100;
+    const acc = calculateAccumulatedScore(config.items);
     const targetCalc = calculateTargetRequiredGrade(
       config.items,
       this.currentTarget,
       config.minFinalGradeRequired,
       config.blockCutoffs
     );
-    const simResult = calculateSimulatedFinalGrade(config.items, this.simulatedScore, config.minFinalGradeRequired, config.blockCutoffs);
-
-    // Dynamic grouping into Generalist Material 3 Outliner Blocks (Estructura 6)
+    const simResult = calculateScenarioSimulation(
+      config.items,
+      this.simulatedGrades,
+      this.fallbackSimScore,
+      config.minFinalGradeRequired,
+      config.blockCutoffs
+    );
     const groups = groupGradeItems(config.items, config.blockCutoffs);
-    if (this.expandedGroups.size === 0 && groups.length > 0) {
-      groups.forEach((g) => this.expandedGroups.add(g.id));
+    const isSum100 = Math.abs(acc.totalWeight - 100) < 0.05;
+
+    // Update KPI cards (preserve slider focus if user is dragging it)
+    const sliderFocused = document.activeElement?.id === 'cursa-sim-slider';
+    const progressEl = this.containerEl.querySelector('#cg-card-progress');
+    if (progressEl) {
+      const tmp = document.createElement('div');
+      safeSetInnerHTML(tmp, this.renderProgressCard(acc, groups));
+      if (tmp.firstElementChild) progressEl.replaceWith(tmp.firstElementChild);
     }
-    const allExpanded = groups.length > 0 && groups.every((g) => this.expandedGroups.has(g.id));
 
-    const targetStatus = this.getTargetStatusColors(targetCalc);
-    const simStatus = this.getSimStatusColors(simResult);
+    const targetEl = this.containerEl.querySelector('#cg-card-target');
+    if (targetEl) {
+      const tmp = document.createElement('div');
+      safeSetInnerHTML(tmp, this.renderTargetCard(targetCalc));
+      if (tmp.firstElementChild) {
+        targetEl.replaceWith(tmp.firstElementChild);
+        this.bindTargetButtons();
+      }
+    }
 
-    return `
-      ${this.renderSubjectHeader(config, subjColor, accumulatedPoints, gradedWeight)}
-      <!-- Integrated HUD Summary Strip (Progreso + Objetivo + Simulador) -->
-      <div style="
-        display: grid;
-        grid-template-columns: repeat(3, 1fr);
-        gap: 14px;
-      ">
-        ${this.renderProgressCard(accumulatedPoints, gradedWeight)}
-        ${this.renderTargetCard(targetCalc, targetStatus)}
-        ${this.renderSimulatorCard(simResult, simStatus)}
-      </div>
-      ${this.renderOutlinerSection(groups, config, allExpanded, totalWeight, isSum100)}
-    `;
-  }
-
-  private renderOutlinerBlock(group: GradeGroup): string {
-    const isExpanded = this.expandedGroups.has(group.id);
-    const hasSubgroups = group.subgroups.length > 1 || (group.subgroups.length === 1 && Boolean(group.subgroups[0].name));
-
-    // Determine Group Semantic Icon
-    let groupIcon = '📁';
-    const lowerName = group.name.toLowerCase();
-    if (lowerName.includes('teor') || lowerName.includes('theory')) groupIcon = '📘';
-    else if (lowerName.includes('práct') || lowerName.includes('pract') || lowerName.includes('lab')) groupIcon = '🔬';
-    else if (lowerName.includes('proy') || lowerName.includes('trabaj')) groupIcon = '🚀';
-    else if (lowerName.includes('exam') || lowerName.includes('parcial')) groupIcon = '📋';
-
-    return `
-      <div class="cursa-outliner-block" data-group-id="${group.id}" style="
-        background: var(--gcal-surface, #282a2d);
-        border: 1px solid ${isExpanded ? 'var(--gcal-border, #444746)' : 'rgba(255,255,255,0.06)'};
-        border-radius: 16px;
-        overflow: hidden;
-        box-shadow: 0 1px 4px rgba(0,0,0,0.18);
-        transition: border-color 0.2s ease;
-      ">
-        <!-- Outliner Block Header Bar -->
-        <div class="cursa-accordion-header" data-group-id="${group.id}" style="
-          padding: 14px 20px;
-          background: ${isExpanded ? 'var(--gcal-surface-hover, #35373b)' : 'var(--gcal-surface, #282a2d)'};
-          border-bottom: ${isExpanded ? '1px solid var(--gcal-border, #444746)' : 'none'};
-          display: flex;
-          align-items: center;
-          justify-content: space-between;
-          cursor: pointer;
-          user-select: none;
-          transition: background 0.15s ease;
-        " onmouseover="this.style.background='var(--gcal-surface-hover, #35373b)';" onmouseout="this.style.background='${isExpanded ? 'var(--gcal-surface-hover, #35373b)' : 'var(--gcal-surface, #282a2d)'}';">
-          
-          <!-- Left side: Chevron, Icon, Title, Weight Badge -->
-          <div style="display: flex; align-items: center; gap: 12px;">
-            <span style="
-              font-size: 12px;
-              color: var(--gcal-secondary-text, #9aa0a6);
-              display: inline-block;
-              transition: transform 0.2s ease;
-              transform: ${isExpanded ? 'rotate(0deg)' : 'rotate(-90deg)'};
-            ">▼</span>
-
-            <span style="font-size: 20px;">${groupIcon}</span>
-
-            <div>
-              <div style="display: flex; align-items: center; gap: 10px;">
-                <span style="
-                  font-family: 'Google Sans', Roboto, sans-serif;
-                  font-weight: 600;
-                  font-size: 15.5px;
-                  color: var(--gcal-text, #e8eaed);
-                ">
-                  ${escapeHtml(group.name)}
-                </span>
-                <span style="
-                  font-size: 11.5px;
-                  font-weight: 600;
-                  background: rgba(138, 180, 248, 0.12);
-                  color: var(--gcal-accent, #8ab4f8);
-                  border: 1px solid rgba(138, 180, 248, 0.25);
-                  padding: 2px 8px;
-                  border-radius: 10px;
-                ">
-                  ${group.totalWeight}% de la Asignatura
-                </span>
-                <span style="
-                  font-size: 11.5px;
-                  color: var(--gcal-secondary-text, #9aa0a6);
-                ">
-                  ${hasSubgroups ? `${group.subgroups.length} temas • ` : ''}${group.items.length} ${group.items.length === 1 ? 'hito' : 'hitos'}
-                </span>
-              </div>
-            </div>
-          </div>
-
-          <!-- Right side: Block Cutoff, Internal Score, Contribution, and Add Button -->
-          <div style="display: flex; align-items: center; gap: 14px;">
-            <!-- Independent Block Cutoff input -->
-            <div style="display: flex; align-items: center; gap: 6px; font-size: 11.5px; color: var(--gcal-secondary-text, #9aa0a6);" title="Nota mínima de corte en este bloque para hacer media">
-              <span>🛡️ Corte bloque:</span>
-              <input type="number" step="0.25" min="0" max="10" placeholder="Sin corte" class="cursa-block-cutoff-input" data-group="${escapeHtml(group.name)}" value="${group.minGradeRequired || ''}" style="
-                width: 58px;
-                padding: 3px 6px;
-                border-radius: 8px;
-                border: 1px solid var(--gcal-border, #444746);
-                background: var(--gcal-surface, #282a2d);
-                color: var(--gcal-text, #e8eaed);
-                font-size: 11.5px;
-                font-weight: 600;
-                text-align: center;
-                outline: none;
-              " onfocus="this.style.borderColor='var(--gcal-accent, #8ab4f8)';" onblur="this.style.borderColor='var(--gcal-border, #444746)';" />
-            </div>
-
-            ${
-              group.gradedWeight > 0
-                ? `
-                  <div style="display: flex; align-items: center; gap: 8px;">
-                    <span style="font-size: 11px; text-transform: uppercase; letter-spacing: 0.5px; color: var(--gcal-secondary-text, #9aa0a6);">
-                      Media Bloque:
-                    </span>
-                    <strong style="
-                      font-size: 15px;
-                      font-weight: 600;
-                      font-family: 'Google Sans', Roboto, sans-serif;
-                      color: ${group.blockScore >= (group.minGradeRequired ?? 5.0) ? '#81c995' : 'var(--gcal-accent, #8ab4f8)'};
-                    ">
-                      ${group.blockScore.toFixed(2)}
-                    </strong>
-                    <span style="font-size: 12px; color: var(--gcal-secondary-text, #9aa0a6);">/ 10</span>
-                    <span style="
-                      font-size: 11.5px;
-                      font-weight: 600;
-                      color: #81c995;
-                      background: rgba(129, 201, 149, 0.12);
-                      border: 1px solid rgba(129, 201, 149, 0.25);
-                      padding: 2px 8px;
-                      border-radius: 8px;
-                    ">
-                      +${group.accumulatedPoints.toFixed(2)} pts global
-                    </span>
-                    ${
-                      typeof group.minGradeRequired === 'number'
-                        ? group.isCutoffMet
-                          ? `<span style="font-size: 11px; color: #81c995; background: rgba(129, 201, 149, 0.15); border: 1px solid rgba(129, 201, 149, 0.3); padding: 2px 8px; border-radius: 8px; font-weight: 600;">✓ Corte superado (${group.blockScore.toFixed(2)} ≥ ${group.minGradeRequired.toFixed(1)})</span>`
-                          : group.isCutoffImpossible
-                          ? `<span style="font-size: 11px; color: #f28b82; background: rgba(242, 139, 130, 0.15); border: 1px solid rgba(242, 139, 130, 0.3); padding: 2px 8px; border-radius: 8px; font-weight: 600;">❌ Corte no alcanzable</span>`
-                          : `<span style="font-size: 11px; color: #fdd663; background: rgba(253, 214, 99, 0.15); border: 1px solid rgba(253, 214, 99, 0.3); padding: 2px 8px; border-radius: 8px; font-weight: 600;">⚠️ Faltan ${group.missingBlockPoints?.toFixed(2)} pts</span>`
-                        : ''
-                    }
-                  </div>
-                `
-                : `
-                  <div style="display: flex; align-items: center; gap: 8px;">
-                    <span style="font-size: 12px; color: var(--gcal-secondary-text, #9aa0a6); font-style: italic;">
-                      Pendiente de evaluar
-                    </span>
-                    ${
-                      typeof group.minGradeRequired === 'number'
-                        ? `<span style="font-size: 11px; color: #fdd663; background: rgba(253, 214, 99, 0.12); border: 1px solid rgba(253, 214, 99, 0.25); padding: 2px 8px; border-radius: 8px; font-weight: 500;">Mín. ${group.minGradeRequired.toFixed(1)} requerido</span>`
-                        : ''
-                    }
-                  </div>
-                `
-            }
-
-            <button type="button" class="cursa-add-to-group-btn" data-group="${escapeHtml(group.name)}" style="
-              background: var(--gcal-surface, #282a2d);
-              color: var(--gcal-accent, #8ab4f8);
-              border: 1px solid var(--gcal-border, #444746);
-              padding: 4px 12px;
-              border-radius: 14px;
-              font-size: 11.5px;
-              font-weight: 500;
-              font-family: 'Google Sans', Roboto, sans-serif;
-              cursor: pointer;
-              display: flex;
-              align-items: center;
-              gap: 4px;
-              transition: all 0.15s ease;
-            " onmouseover="this.style.background='var(--gcal-selected, #004a77)';" onmouseout="this.style.background='var(--gcal-surface, #282a2d)';">
-              <span style="font-weight: 700;">+</span>
-              <span>Añadir Hito</span>
-            </button>
-          </div>
-        </div>
-
-        <!-- Outliner Block Body (Option 6 Nested Trees) -->
-        ${
-          isExpanded
-            ? `
-              <div style="
-                background: var(--gcal-surface, #282a2d);
-                padding: 12px 18px 16px 18px;
-                display: flex;
-                flex-direction: column;
-                gap: 8px;
-              ">
-                ${
-                  hasSubgroups
-                    ? group.subgroups
-                        .map((sub) => {
-                          const relInGroup =
-                            group.totalWeight > 0 ? Math.round((sub.totalWeight / group.totalWeight) * 1000) / 10 : 0;
-
-                          return `
-                            <!-- Topic Branch Container (Tree Node) -->
-                            <div class="cursa-topic-branch" style="
-                              margin: 4px 0 8px 6px;
-                              border-left: 2px solid rgba(138, 180, 248, 0.35);
-                              padding-left: 14px;
-                              display: flex;
-                              flex-direction: column;
-                              gap: 6px;
-                            ">
-                              <!-- Topic Header Bar -->
-                              <div style="
-                                display: flex;
-                                justify-content: space-between;
-                                align-items: center;
-                                padding: 6px 12px;
-                                background: rgba(255, 255, 255, 0.025);
-                                border-radius: 8px;
-                                margin-bottom: 4px;
-                              ">
-                                <div style="display: flex; align-items: center; gap: 8px;">
-                                  <span style="font-size: 13px;">📁</span>
-                                  <strong style="
-                                    font-size: 13.5px;
-                                    font-weight: 600;
-                                    font-family: 'Google Sans', Roboto, sans-serif;
-                                    color: var(--gcal-text, #e8eaed);
-                                  ">
-                                    ${escapeHtml(sub.name || 'General')}
-                                  </strong>
-                                  <span style="
-                                    font-size: 11px;
-                                    font-weight: 600;
-                                    background: rgba(138, 180, 248, 0.12);
-                                    color: var(--gcal-accent, #8ab4f8);
-                                    border: 1px solid rgba(138, 180, 248, 0.25);
-                                    padding: 1px 7px;
-                                    border-radius: 6px;
-                                  ">
-                                    ${sub.totalWeight}% global (${relInGroup}% de ${escapeHtml(group.name)})
-                                  </span>
-                                </div>
-
-                                <div style="display: flex; align-items: center; gap: 10px;">
-                                  ${
-                                    sub.gradedWeight > 0
-                                      ? `<span style="font-size: 12px; color: var(--gcal-secondary-text, #9aa0a6);">
-                                          Media tema: <strong style="color: ${sub.internalScore! >= 5.0 ? '#81c995' : 'var(--gcal-accent, #8ab4f8)'}; font-size: 13px;">${sub.internalScore?.toFixed(2)}</strong> / 10
-                                          <span style="color: #81c995; font-weight: 600; margin-left: 4px;">(+${sub.accumulatedPoints.toFixed(2)} pts)</span>
-                                        </span>`
-                                      : `<span style="font-size: 11.5px; color: var(--gcal-secondary-text, #9aa0a6); font-style: italic;">Pendiente</span>`
-                                  }
-                                  <button type="button" class="cursa-add-to-subgroup-btn" data-group="${escapeHtml(group.name)}" data-sub="${escapeHtml(sub.name)}" style="
-                                    background: transparent;
-                                    border: 1px solid var(--gcal-border, #444746);
-                                    color: var(--gcal-secondary-text, #9aa0a6);
-                                    padding: 2px 10px;
-                                    border-radius: 12px;
-                                    font-size: 11px;
-                                    cursor: pointer;
-                                    transition: all 0.15s ease;
-                                  " onmouseover="this.style.background='var(--gcal-surface-hover, #35373b)'; this.style.color='var(--gcal-accent, #8ab4f8)';" onmouseout="this.style.background='transparent'; this.style.color='var(--gcal-secondary-text, #9aa0a6)';">+ Añadir a ${escapeHtml(sub.name || 'este tema')}</button>
-                                </div>
-                              </div>
-
-                              <!-- Nested Items for this topic -->
-                              ${sub.items.map((itemWrap) => this.renderOutlinerRow(itemWrap, group, sub)).join('')}
-                            </div>
-                          `;
-                        })
-                        .join('')
-                    : group.items.map((itemWrap) => this.renderOutlinerRow(itemWrap, group)).join('')
-                }
-
-                <!-- Outliner Block Footer (Subtotal) -->
-                <div style="
-                  margin-top: 6px;
-                  padding: 10px 14px;
-                  background: rgba(255, 255, 255, 0.015);
-                  border-top: 1px solid var(--gcal-border, #444746);
-                  border-radius: 0 0 12px 12px;
-                  display: flex;
-                  justify-content: space-between;
-                  align-items: center;
-                  font-size: 12px;
-                  color: var(--gcal-secondary-text, #9aa0a6);
-                ">
-                  <div>
-                    Subtotal ${escapeHtml(group.name)}: <strong style="color: var(--gcal-text, #e8eaed);">${group.totalWeight}% ponderación</strong> • ${group.gradedWeight}% evaluado ${group.internalScore !== null ? `(media parcial: <strong style="color: var(--gcal-text, #e8eaed);">${group.internalScore.toFixed(2)} / 10</strong>)` : ''}
-                  </div>
-                  <div>
-                    Aporte a la nota final: <strong style="color: #81c995; font-size: 13px;">+${group.accumulatedPoints.toFixed(2)} pts</strong>
-                  </div>
-                </div>
-              </div>
-            `
-            : ''
+    if (sliderFocused) {
+      this.updateScenarioReadoutOnly(simResult);
+    } else {
+      const scenEl = this.containerEl.querySelector('#cg-card-scenario');
+      if (scenEl) {
+        const tmp = document.createElement('div');
+        safeSetInnerHTML(tmp, this.renderScenarioCard(simResult));
+        if (tmp.firstElementChild) {
+          scenEl.replaceWith(tmp.firstElementChild);
+          this.bindScenarioControls();
         }
-      </div>
-    `;
+      }
+    }
+
+    // Update cutoffs strip
+    const cutoffsContainer = this.containerEl.querySelector('#cg-cutoffs-strip-container') as HTMLElement | null;
+    if (cutoffsContainer) {
+      safeSetInnerHTML(cutoffsContainer, this.renderCutoffsStrip(simResult.cutoffDiagnostics));
+    }
+
+    // Update header subtitle
+    const subEl = this.containerEl.querySelector('#cg-header-subtitle') as HTMLElement | null;
+    if (subEl) {
+      safeSetInnerHTML(
+        subEl,
+        `<span><strong>${acc.accumulatedPoints.toFixed(2)}</strong> pts asegurados</span>
+         <span>·</span>
+         <span>Media actual: <strong>${acc.currentAverage !== null ? acc.currentAverage.toFixed(2) : '—'}</strong> (${acc.gradedWeight}% evaluado)</span>
+         <span>·</span>
+         <span>Máx. posible: <strong>${acc.maxPossibleGrade.toFixed(2)}</strong></span>`
+      );
+    }
+
+    // Update weight footer
+    const footerContainer = this.containerEl.querySelector('#cg-weight-footer-container') as HTMLElement | null;
+    if (footerContainer) {
+      safeSetInnerHTML(
+        footerContainer,
+        this.renderWeightFooter(acc.totalWeight, isSum100, config.items.length, groups.length)
+      );
+      this.bindNormalizeButton();
+    }
+
+    // Update contribution cells in-place
+    config.items.forEach((item) => {
+      const contribEl = this.containerEl?.querySelector(`[data-contrib-for="${CSS.escape(item.id)}"]`) as HTMLElement | null;
+      if (!contribEl) return;
+      const hasReal = typeof item.grade === 'number' && !isNaN(item.grade);
+      const hasSim = !hasReal && typeof this.simulatedGrades[item.id] === 'number';
+      const val = hasReal ? item.grade! : hasSim ? this.simulatedGrades[item.id] : null;
+      contribEl.textContent = val !== null ? `${hasSim ? '~' : '+'}${((val * item.weight) / 100).toFixed(2)}` : '—';
+      contribEl.className = `cg-contrib-cell ${hasReal ? 'graded' : hasSim ? 'simulated' : ''}`;
+    });
   }
 
-  private renderOutlinerRow(itemWrap: GradeGroupItem, group: GradeGroup, sub?: GradeSubgroup): string {
-    const { item, originalIndex, displayName } = itemWrap;
-    const hasGrade = typeof item.grade === 'number' && !isNaN(item.grade);
-    const contrib = hasGrade ? ((item.grade! * item.weight) / 100).toFixed(2) : '—';
+  private updateScenarioReadoutOnly(sim: ReturnType<typeof calculateScenarioSimulation>): void {
+    if (!this.containerEl) return;
+    const scoreVal = this.containerEl.querySelector('#cursa-sim-score-val');
+    if (scoreVal) scoreVal.textContent = this.fallbackSimScore.toFixed(1);
 
-    // Relative weight calculations
-    const relInGroup = group.totalWeight > 0 ? Math.round((item.weight / group.totalWeight) * 1000) / 10 : 0;
-    const relInSub = sub && sub.totalWeight > 0 ? Math.round((item.weight / sub.totalWeight) * 1000) / 10 : 0;
+    const gradeVal = this.containerEl.querySelector('#cursa-sim-final-grade-val');
+    if (gradeVal) gradeVal.textContent = sim.finalGrade.toFixed(2);
 
-    return `
-      <div class="cursa-outliner-row" data-idx="${originalIndex}" style="
-        display: flex;
-        align-items: center;
-        justify-content: space-between;
-        gap: 12px;
-        padding: 8px 12px;
-        background: rgba(255, 255, 255, 0.02);
-        border: 1px solid rgba(255, 255, 255, 0.05);
-        border-radius: 10px;
-        transition: all 0.15s ease;
-      " onmouseover="this.style.background='var(--gcal-surface-hover, #35373b)'; this.style.borderColor='rgba(138, 180, 248, 0.3)';" onmouseout="this.style.background='rgba(255, 255, 255, 0.02)'; this.style.borderColor='rgba(255, 255, 255, 0.05)';">
-
-        <!-- Left side: Type Selector, Name Input, Google Calendar Link -->
-        <div style="display: flex; align-items: center; gap: 10px; flex: 1; min-width: 0;">
-          <!-- Type Selector -->
-          <select class="cursa-item-type-select" data-idx="${originalIndex}" style="
-            padding: 3px 6px;
-            border-radius: 8px;
-            border: 1px solid var(--gcal-border, #444746);
-            background: var(--gcal-surface, #282a2d);
-            color: ${item.type === 'EXAMEN' ? '#8ab4f8' : item.type === 'ENTREGA' ? '#81c995' : '#fdd663'};
-            font-size: 11.5px;
-            font-weight: 600;
-            cursor: pointer;
-            outline: none;
-            flex-shrink: 0;
-          ">
-            <option value="EXAMEN" ${item.type === 'EXAMEN' ? 'selected' : ''}>📋 Examen</option>
-            <option value="ENTREGA" ${item.type === 'ENTREGA' ? 'selected' : ''}>🗓️ Entrega</option>
-            <option value="OTRO" ${item.type === 'OTRO' ? 'selected' : ''}>💻 Práctica</option>
-          </select>
-
-          <!-- Name Input -->
-          <input type="text" class="cursa-item-name-input" data-idx="${originalIndex}" data-group="${escapeHtml(group.name)}" data-sub="${escapeHtml(sub?.name || '')}" value="${escapeHtml(displayName)}" style="
-            font-weight: 500;
-            border: 1px solid transparent;
-            background: transparent;
-            color: var(--gcal-text, #e8eaed);
-            padding: 4px 8px;
-            border-radius: 6px;
-            font-size: 13.5px;
-            flex: 1;
-            min-width: 140px;
-            outline: none;
-            transition: all 0.15s ease;
-          " onfocus="this.style.borderColor='var(--gcal-accent, #8ab4f8)'; this.style.background='var(--gcal-surface, #282a2d)';" onblur="this.style.borderColor='transparent'; this.style.background='transparent';" />
-
-          <!-- Google Calendar Link -->
-          ${
-            item.linkedCalendarEventId
-              ? `<div style="
-                  display: inline-flex;
-                  align-items: center;
-                  gap: 5px;
-                  background: rgba(129, 201, 149, 0.15);
-                  color: #81c995;
-                  border: 1px solid rgba(129, 201, 149, 0.3);
-                  padding: 2px 8px;
-                  border-radius: 10px;
-                  font-size: 11.5px;
-                  font-weight: 500;
-                  max-width: 200px;
-                  flex-shrink: 0;
-                ">
-                  <span>🗓️</span>
-                  <span style="overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">
-                    ${escapeHtml(item.linkedEventTitle || 'Evento')}
-                  </span>
-                  <button type="button" class="cursa-unlink-btn" data-idx="${originalIndex}" style="
-                    background: none;
-                    border: none;
-                    cursor: pointer;
-                    color: #81c995;
-                    font-size: 12px;
-                    padding: 0 2px;
-                  " title="Desvincular">✕</button>
-                </div>`
-              : `<button type="button" class="cursa-link-cal-btn" data-idx="${originalIndex}" style="
-                  background: transparent;
-                  border: 1px dashed var(--gcal-border, #444746);
-                  color: var(--gcal-secondary-text, #9aa0a6);
-                  padding: 2px 8px;
-                  border-radius: 10px;
-                  font-size: 11px;
-                  font-weight: 500;
-                  cursor: pointer;
-                  display: flex;
-                  align-items: center;
-                  gap: 4px;
-                  flex-shrink: 0;
-                  transition: all 0.15s ease;
-                " onmouseover="this.style.background='var(--gcal-surface-hover, #35373b)'; this.style.borderColor='var(--gcal-accent, #8ab4f8)'; this.style.color='var(--gcal-accent, #8ab4f8)';" onmouseout="this.style.background='transparent'; this.style.borderColor='var(--gcal-border, #444746)'; this.style.color='var(--gcal-secondary-text, #9aa0a6)';">
-                  <span>🔗</span> <span>Vincular</span>
-                </button>`
-          }
-        </div>
-
-        <!-- Right side: Weight, Grade Input, Contribution, Delete -->
-        <div style="display: flex; align-items: center; gap: 12px; flex-shrink: 0;">
-          <!-- Weight Input & relative badge -->
-          <div style="display: flex; align-items: center; gap: 4px;">
-            <input type="number" min="0" max="100" step="0.5" class="cursa-item-weight-input" data-idx="${originalIndex}" value="${item.weight}" style="
-              width: 50px;
-              padding: 3px 6px;
-              border-radius: 6px;
-              border: 1px solid var(--gcal-border, #444746);
-              background: var(--gcal-surface, #282a2d);
-              color: var(--gcal-text, #e8eaed);
-              font-weight: 600;
-              text-align: right;
-              font-size: 12px;
-              outline: none;
-            " onfocus="this.style.borderColor='var(--gcal-accent, #8ab4f8)';" onblur="this.style.borderColor='var(--gcal-border, #444746)';" />
-            <span style="color: var(--gcal-secondary-text, #9aa0a6); font-size: 11.5px; font-weight: 500;">% peso</span>
-            ${
-              sub && sub.name
-                ? `<span style="font-size: 10.5px; color: var(--gcal-secondary-text, #9aa0a6); font-weight: 500;">
-                    (${relInSub}%)
-                  </span>`
-                : group.name !== 'Evaluación General'
-                ? `<span style="font-size: 10.5px; color: var(--gcal-secondary-text, #9aa0a6); font-weight: 500;">
-                    (${relInGroup}%)
-                  </span>`
-                : ''
-            }
-          </div>
-
-          <!-- Grade Input -->
-          <div style="display: flex; align-items: center; gap: 5px;">
-            <input type="number" step="0.05" min="0" max="10" placeholder="Pendiente" class="cursa-item-grade-input" data-idx="${originalIndex}" value="${hasGrade ? item.grade : ''}" style="
-              width: 72px;
-              padding: 3px 6px;
-              border-radius: 8px;
-              border: 1.5px solid ${hasGrade ? 'var(--gcal-accent, #8ab4f8)' : 'var(--gcal-border, #444746)'};
-              background: ${hasGrade ? 'rgba(138, 180, 248, 0.12)' : 'var(--gcal-surface, #282a2d)'};
-              color: ${hasGrade ? 'var(--gcal-accent, #8ab4f8)' : 'var(--gcal-text, #e8eaed)'};
-              font-weight: ${hasGrade ? '700' : '400'};
-              font-style: ${hasGrade ? 'normal' : 'italic'};
-              text-align: right;
-              font-size: 12.5px;
-              outline: none;
-              transition: all 0.15s ease;
-            " onfocus="this.style.borderColor='var(--gcal-accent, #8ab4f8)';" onblur="this.style.borderColor='${hasGrade ? 'var(--gcal-accent, #8ab4f8)' : 'var(--gcal-border, #444746)'}';" />
-            <span style="color: var(--gcal-secondary-text, #9aa0a6); font-size: 11.5px;">/ 10</span>
-          </div>
-
-          <!-- Contribution -->
-          <div style="width: 75px; text-align: right;">
-            <span style="
-              font-family: 'Google Sans', Roboto, sans-serif;
-              font-weight: 600;
-              color: ${hasGrade ? '#81c995' : 'var(--gcal-secondary-text, #9aa0a6)'};
-              font-size: 13px;
-            ">
-              ${hasGrade ? `+${contrib} pts` : '—'}
-            </span>
-          </div>
-
-          <!-- Delete Row Button -->
-          <button type="button" class="cursa-del-item-btn" data-idx="${originalIndex}" style="
-            background: none;
-            border: none;
-            color: var(--gcal-secondary-text, #9aa0a6);
-            cursor: pointer;
-            font-size: 14px;
-            width: 24px;
-            height: 24px;
-            border-radius: 50%;
-            display: inline-flex;
-            align-items: center;
-            justify-content: center;
-            transition: all 0.15s ease;
-          " onmouseover="this.style.background='rgba(242, 139, 130, 0.15)'; this.style.color='#f28b82';" onmouseout="this.style.background='none'; this.style.color='var(--gcal-secondary-text, #9aa0a6)';" title="Eliminar este ítem">✕</button>
-        </div>
-      </div>
-    `;
+    const badge = this.containerEl.querySelector('#cursa-sim-status-badge') as HTMLElement | null;
+    const gradeBox = this.containerEl.querySelector('#cursa-sim-final-grade-box') as HTMLElement | null;
+    let cls = 'cg-pill-success';
+    let label = 'Aprobado';
+    let color = 'var(--cg-success)';
+    if (sim.isCutoffFailed) {
+      cls = 'cg-pill-danger';
+      label = sim.failedBlockCutoff ? `Corte: ${sim.failedBlockCutoff}` : 'Corte no superado';
+      color = 'var(--cg-danger)';
+    } else if (sim.finalGrade >= 9.0) {
+      label = 'Sobresaliente';
+    } else if (sim.finalGrade >= 7.0) {
+      cls = 'cg-pill-accent';
+      label = 'Notable';
+      color = 'var(--cg-accent)';
+    } else if (sim.finalGrade < 5.0) {
+      cls = 'cg-pill-danger';
+      label = 'Suspenso (< 5.0)';
+      color = 'var(--cg-danger)';
+    }
+    if (badge) {
+      badge.className = `cg-pill ${cls}`;
+      badge.textContent = label;
+    }
+    if (gradeBox) gradeBox.style.color = color;
   }
+
+  private bindTargetButtons(): void {
+    this.containerEl?.querySelectorAll<HTMLButtonElement>('.cursa-target-btn').forEach((btn) => {
+      btn.addEventListener('click', () => {
+        this.currentTarget = parseFloat(btn.getAttribute('data-target') || '5.0');
+        this.updateLiveMetricsInPlace();
+      });
+    });
+  }
+
+  private bindScenarioControls(): void {
+    const slider = this.containerEl?.querySelector('#cursa-sim-slider') as HTMLInputElement | null;
+    slider?.addEventListener('input', () => {
+      this.fallbackSimScore = parseFloat(slider.value);
+      this.updateLiveMetricsInPlace();
+    });
+
+    this.containerEl?.querySelector('#cursa-clear-sim-btn')?.addEventListener('click', () => {
+      this.simulatedGrades = {};
+      this.simInputModeIds.clear();
+      this.render();
+    });
+
+    this.containerEl?.querySelector('#cursa-commit-sim-btn')?.addEventListener('click', () => {
+      if (!this.currentConfig) return;
+      for (const item of this.currentConfig.items) {
+        if (typeof this.simulatedGrades[item.id] === 'number' && (item.grade === null || isNaN(item.grade))) {
+          item.grade = this.simulatedGrades[item.id];
+        }
+      }
+      this.simulatedGrades = {};
+      this.simInputModeIds.clear();
+      saveSubjectGrades(this.currentConfig);
+      this.render();
+    });
+  }
+
+  private bindNormalizeButton(): void {
+    this.containerEl?.querySelector('#cursa-normalize-weights-btn')?.addEventListener('click', () => {
+      if (!this.currentConfig) return;
+      this.currentConfig.items = normalizeWeightsTo100(this.currentConfig.items);
+      saveSubjectGrades(this.currentConfig);
+      this.render();
+    });
+  }
+
   private attachEvents(): void {
     if (!this.containerEl) return;
 
-    // Open Academic Plan / Course Settings
+    // Academic plan settings
     this.containerEl.querySelector('#cursa-grades-open-plan-btn')?.addEventListener('click', () => {
       OnboardingModal.getInstance().open(true);
     });
@@ -1482,83 +1186,160 @@ private getTargetStatusColors(targetCalc: ReturnType<typeof calculateTargetRequi
       OnboardingModal.getInstance().open(true);
     });
 
-    // Subject tabs
-    this.containerEl.querySelectorAll<HTMLButtonElement>('.cursa-grade-subj-tab').forEach((btn) => {
-      btn.addEventListener('click', () => {
-        const subj = btn.getAttribute('data-subj');
+    // Subject & Overview tabs
+    this.containerEl.querySelectorAll<HTMLElement>('.cursa-grade-subj-tab, .cursa-overview-card-btn').forEach((el) => {
+      el.addEventListener('click', () => {
+        const subj = el.getAttribute('data-subj');
         if (subj) this.setActiveSubject(subj);
       });
     });
 
-    // Open AI Chat
-    this.containerEl.querySelector('#cursa-grades-open-ai-chat')?.addEventListener('click', () => {
-      this.openAIChat();
-    });
-    this.containerEl.querySelector('#cursa-reconfigure-ai-btn')?.addEventListener('click', () => {
-      this.openAIChat();
-    });
+    // AI Chat
+    this.containerEl.querySelector('#cursa-grades-open-ai-chat')?.addEventListener('click', () => this.openAIChat());
+    this.containerEl.querySelector('#cursa-reconfigure-ai-btn')?.addEventListener('click', () => this.openAIChat());
 
-    // Use default template
+    // Templates
     this.containerEl.querySelector('#cursa-grades-use-template')?.addEventListener('click', () => {
       this.currentConfig = createInitialSubjectGrades(this.activeSubject);
       saveSubjectGrades(this.currentConfig);
       this.loadSubject(this.activeSubject);
     });
+    this.containerEl.querySelector('#cursa-grades-start-blank')?.addEventListener('click', () => {
+      this.currentConfig = {
+        subjectName: this.activeSubject,
+        credits: 6,
+        items: [
+          {
+            id: `item_${Date.now()}_1`,
+            name: 'Examen Final',
+            type: 'EXAMEN',
+            weight: 100,
+            grade: null,
+            category: 'Evaluación General'
+          }
+        ],
+        updatedAt: Date.now()
+      };
+      saveSubjectGrades(this.currentConfig);
+      this.loadSubject(this.activeSubject);
+    });
 
-    // Delete grades
-    this.containerEl.querySelector('#cursa-delete-grades-btn')?.addEventListener('click', () => {
-      if (confirm(`¿Borrar las notas y configuración de ${this.activeSubject}?`)) {
-        deleteSubjectGrades(this.activeSubject);
-        this.currentConfig = null;
-        this.render();
+    // Credits ECTS input
+    const creditsInput = this.containerEl.querySelector('#cursa-credits-input') as HTMLInputElement | null;
+    creditsInput?.addEventListener('change', () => {
+      if (!this.currentConfig) return;
+      const val = parseFloat(creditsInput.value);
+      if (!isNaN(val) && val > 0) {
+        this.currentConfig.credits = Math.min(30, Math.max(1, val));
+        saveSubjectGrades(this.currentConfig);
       }
     });
 
-    // Add Item (Top Button)
+    // Inline delete confirmation
+    this.containerEl.querySelector('#cursa-delete-grades-btn')?.addEventListener('click', () => {
+      this.pendingDeleteConfirm = !this.pendingDeleteConfirm;
+      this.render();
+    });
+    this.containerEl.querySelector('#cursa-confirm-delete-cancel')?.addEventListener('click', () => {
+      this.pendingDeleteConfirm = false;
+      this.render();
+    });
+    this.containerEl.querySelector('#cursa-confirm-delete-yes')?.addEventListener('click', () => {
+      deleteSubjectGrades(this.activeSubject);
+      this.currentConfig = null;
+      this.pendingDeleteConfirm = false;
+      this.render();
+    });
+
+    // Add new Block
+    this.containerEl.querySelector('#cursa-add-block-btn')?.addEventListener('click', () => {
+      if (!this.currentConfig) return;
+      const existingGroups = groupGradeItems(this.currentConfig.items, this.currentConfig.blockCutoffs);
+      const newBlockName = `Bloque ${existingGroups.length + 1}`;
+      this.currentConfig.items.push({
+        id: `item_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
+        name: 'Nueva evaluación',
+        type: 'EXAMEN',
+        weight: 0,
+        grade: null,
+        category: newBlockName
+      });
+      saveSubjectGrades(this.currentConfig);
+      this.expandedGroups.add(newBlockName.toLowerCase().replace(/[^a-z0-9]/g, '_'));
+      this.render();
+    });
+
+    // Add Item (global)
     this.containerEl.querySelector('#cursa-add-item-btn')?.addEventListener('click', () => {
       if (!this.currentConfig) return;
+      const groups = groupGradeItems(this.currentConfig.items, this.currentConfig.blockCutoffs);
+      const defaultCategory = groups.length > 0 ? groups[0].name : undefined;
       this.currentConfig.items.push({
-        id: `item_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`,
+        id: `item_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
         name: `Evaluación ${this.currentConfig.items.length + 1}`,
         type: 'EXAMEN',
         weight: 10,
-        grade: null
+        grade: null,
+        category: defaultCategory !== 'Evaluación General' ? defaultCategory : undefined
       });
       saveSubjectGrades(this.currentConfig);
       this.render();
     });
 
-    // Add Item to Specific Group
+    // Add Item to Group
     this.containerEl.querySelectorAll<HTMLButtonElement>('.cursa-add-to-group-btn').forEach((btn) => {
       btn.addEventListener('click', (e) => {
         e.stopPropagation();
-        const groupName = btn.getAttribute('data-group') || 'Evaluación General';
         if (!this.currentConfig) return;
+        const groupName = btn.getAttribute('data-group') || 'Evaluación General';
         this.currentConfig.items.push({
-          id: `item_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`,
-          name: `Nueva Evaluación`,
+          id: `item_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
+          name: 'Nueva evaluación',
           category: groupName !== 'Evaluación General' ? groupName : undefined,
           type: 'EXAMEN',
           weight: 10,
           grade: null
         });
         saveSubjectGrades(this.currentConfig);
-        const groupId = groupName.toLowerCase().replace(/[^a-z0-9]/g, '_');
-        this.expandedGroups.add(groupId);
+        this.expandedGroups.add(groupName.toLowerCase().replace(/[^a-z0-9]/g, '_'));
         this.render();
       });
     });
 
-    // Add Item to Specific Subgroup (Topic / Theme)
+    // Add Subtopic to Group
+    this.containerEl.querySelectorAll<HTMLButtonElement>('.cursa-add-subgroup-btn').forEach((btn) => {
+      btn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        if (!this.currentConfig) return;
+        const groupName = btn.getAttribute('data-group') || 'Prácticas';
+        const groups = groupGradeItems(this.currentConfig.items, this.currentConfig.blockCutoffs);
+        const grp = groups.find((g) => g.name === groupName);
+        const nextNum = (grp?.subgroups.filter((s) => Boolean(s.name)).length || 0) + 1;
+        this.currentConfig.items.push({
+          id: `item_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
+          name: 'Nueva entrega',
+          category: groupName,
+          subcategory: `Tema ${nextNum}`,
+          type: 'ENTREGA',
+          weight: 5,
+          grade: null
+        });
+        saveSubjectGrades(this.currentConfig);
+        this.expandedGroups.add(groupName.toLowerCase().replace(/[^a-z0-9]/g, '_'));
+        this.render();
+      });
+    });
+
+    // Add Item to Subgroup
     this.containerEl.querySelectorAll<HTMLButtonElement>('.cursa-add-to-subgroup-btn').forEach((btn) => {
       btn.addEventListener('click', (e) => {
         e.stopPropagation();
-        const group = btn.getAttribute('data-group') || 'Prácticas';
-        const sub = btn.getAttribute('data-sub') || 'Tema';
         if (!this.currentConfig) return;
+        const group = btn.getAttribute('data-group') || 'Prácticas';
+        const sub = btn.getAttribute('data-sub') || 'Tema 1';
         this.currentConfig.items.push({
-          id: `item_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`,
-          name: `Nueva Entrega`,
+          id: `item_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
+          name: 'Nueva evaluación',
           category: group,
           subcategory: sub,
           type: 'ENTREGA',
@@ -1566,8 +1347,7 @@ private getTargetStatusColors(targetCalc: ReturnType<typeof calculateTargetRequi
           grade: null
         });
         saveSubjectGrades(this.currentConfig);
-        const groupId = group.toLowerCase().replace(/[^a-z0-9]/g, '_');
-        this.expandedGroups.add(groupId);
+        this.expandedGroups.add(group.toLowerCase().replace(/[^a-z0-9]/g, '_'));
         this.render();
       });
     });
@@ -1577,28 +1357,76 @@ private getTargetStatusColors(targetCalc: ReturnType<typeof calculateTargetRequi
       if (!this.currentConfig) return;
       const groups = groupGradeItems(this.currentConfig.items, this.currentConfig.blockCutoffs);
       const allExpanded = groups.length > 0 && groups.every((g) => this.expandedGroups.has(g.id));
-      if (allExpanded) {
-        this.expandedGroups.clear();
-      } else {
-        groups.forEach((g) => this.expandedGroups.add(g.id));
-      }
+      if (allExpanded) this.expandedGroups.clear();
+      else groups.forEach((g) => this.expandedGroups.add(g.id));
       this.render();
     });
 
-    // Accordion Header Click (Toggle Single Group)
+    // Accordion Header Toggle
     this.containerEl.querySelectorAll<HTMLElement>('.cursa-accordion-header').forEach((header) => {
       header.addEventListener('click', (e) => {
-        // Prevent toggle if clicking on cutoff input or buttons
-        if ((e.target as HTMLElement).closest('.cursa-block-cutoff-input') || (e.target as HTMLElement).closest('button')) {
-          return;
-        }
+        const target = e.target as HTMLElement;
+        if (target.closest('input') || target.closest('button') || target.closest('label')) return;
         const groupId = header.getAttribute('data-group-id');
         if (!groupId) return;
-        if (this.expandedGroups.has(groupId)) {
-          this.expandedGroups.delete(groupId);
-        } else {
-          this.expandedGroups.add(groupId);
+        if (this.expandedGroups.has(groupId)) this.expandedGroups.delete(groupId);
+        else this.expandedGroups.add(groupId);
+        this.render();
+      });
+    });
+
+    // Rename Block
+    this.containerEl.querySelectorAll<HTMLInputElement>('.cursa-block-rename-input').forEach((inp) => {
+      inp.addEventListener('click', (e) => e.stopPropagation());
+      inp.addEventListener('change', () => {
+        if (!this.currentConfig) return;
+        const oldName = inp.getAttribute('data-old-group') || '';
+        const newName = inp.value.trim();
+        if (!newName || newName === oldName) {
+          inp.value = oldName;
+          return;
         }
+        const groups = groupGradeItems(this.currentConfig.items, this.currentConfig.blockCutoffs);
+        const grp = groups.find((g) => g.name === oldName);
+        if (grp) {
+          grp.items.forEach((w) => {
+            if (this.currentConfig!.items[w.originalIndex]) {
+              this.currentConfig!.items[w.originalIndex].category = newName;
+            }
+          });
+        }
+        if (this.currentConfig.blockCutoffs && oldName in this.currentConfig.blockCutoffs) {
+          this.currentConfig.blockCutoffs[newName] = this.currentConfig.blockCutoffs[oldName];
+          delete this.currentConfig.blockCutoffs[oldName];
+        }
+        this.expandedGroups.add(newName.toLowerCase().replace(/[^a-z0-9]/g, '_'));
+        saveSubjectGrades(this.currentConfig);
+        this.render();
+      });
+    });
+
+    // Rename Subtopic
+    this.containerEl.querySelectorAll<HTMLInputElement>('.cursa-subtopic-rename-input').forEach((inp) => {
+      inp.addEventListener('change', () => {
+        if (!this.currentConfig) return;
+        const groupName = inp.getAttribute('data-group') || '';
+        const oldSub = inp.getAttribute('data-old-sub') || '';
+        const newSub = inp.value.trim();
+        if (!newSub || newSub === oldSub) {
+          inp.value = oldSub;
+          return;
+        }
+        const groups = groupGradeItems(this.currentConfig.items, this.currentConfig.blockCutoffs);
+        const grp = groups.find((g) => g.name === groupName);
+        const sub = grp?.subgroups.find((s) => s.name === oldSub);
+        if (sub) {
+          sub.items.forEach((w) => {
+            if (this.currentConfig!.items[w.originalIndex]) {
+              this.currentConfig!.items[w.originalIndex].subcategory = newSub;
+            }
+          });
+        }
+        saveSubjectGrades(this.currentConfig);
         this.render();
       });
     });
@@ -1612,8 +1440,8 @@ private getTargetStatusColors(targetCalc: ReturnType<typeof calculateTargetRequi
         if (!groupName || !this.currentConfig) return;
         if (!this.currentConfig.blockCutoffs) this.currentConfig.blockCutoffs = {};
         const val = inp.value.trim() === '' ? undefined : parseFloat(inp.value);
-        if (val !== undefined && !isNaN(val)) {
-          this.currentConfig.blockCutoffs[groupName] = val;
+        if (val !== undefined && !isNaN(val) && val > 0) {
+          this.currentConfig.blockCutoffs[groupName] = Math.min(10, val);
         } else {
           delete this.currentConfig.blockCutoffs[groupName];
         }
@@ -1622,14 +1450,38 @@ private getTargetStatusColors(targetCalc: ReturnType<typeof calculateTargetRequi
       });
     });
 
-    // Inputs: Item Name
+    // Global Cutoff Input
+    const cutoffInput = this.containerEl.querySelector('#cursa-cutoff-input') as HTMLInputElement | null;
+    cutoffInput?.addEventListener('change', () => {
+      if (!this.currentConfig) return;
+      const val = cutoffInput.value.trim() === '' ? undefined : parseFloat(cutoffInput.value);
+      this.currentConfig.minFinalGradeRequired = val && !isNaN(val) && val > 0 ? Math.min(10, val) : undefined;
+      saveSubjectGrades(this.currentConfig);
+      this.updateLiveMetricsInPlace();
+    });
+
+    // Item Type Pill (click cycles EXAMEN -> ENTREGA -> OTRO)
+    this.containerEl.querySelectorAll<HTMLButtonElement>('.cursa-item-type-pill').forEach((btn) => {
+      btn.addEventListener('click', () => {
+        const idx = parseInt(btn.getAttribute('data-idx') || '0', 10);
+        if (!this.currentConfig || !this.currentConfig.items[idx]) return;
+        const current = this.currentConfig.items[idx].type;
+        const next = TYPE_CYCLE[(TYPE_CYCLE.indexOf(current) + 1) % TYPE_CYCLE.length];
+        this.currentConfig.items[idx].type = next;
+        saveSubjectGrades(this.currentConfig);
+        btn.className = `cg-type-pill ${next} cursa-item-type-pill`;
+        btn.textContent = TYPE_LABELS[next];
+      });
+    });
+
+    // Item Name Input
     this.containerEl.querySelectorAll<HTMLInputElement>('.cursa-item-name-input').forEach((inp) => {
       inp.addEventListener('change', () => {
         const idx = parseInt(inp.getAttribute('data-idx') || '0', 10);
         const group = inp.getAttribute('data-group');
         const sub = inp.getAttribute('data-sub');
         if (this.currentConfig && this.currentConfig.items[idx]) {
-          this.currentConfig.items[idx].name = inp.value.trim() || `Ítem ${idx + 1}`;
+          this.currentConfig.items[idx].name = inp.value.trim() || `Evaluación ${idx + 1}`;
           if (group && group !== 'Evaluación General') {
             this.currentConfig.items[idx].category = group;
           }
@@ -1641,48 +1493,94 @@ private getTargetStatusColors(targetCalc: ReturnType<typeof calculateTargetRequi
       });
     });
 
-    // Select: Item Type
-    this.containerEl.querySelectorAll<HTMLSelectElement>('.cursa-item-type-select').forEach((sel) => {
-      sel.addEventListener('change', () => {
-        const idx = parseInt(sel.getAttribute('data-idx') || '0', 10);
-        if (this.currentConfig && this.currentConfig.items[idx]) {
-          this.currentConfig.items[idx].type = sel.value as GradeItemType;
-          saveSubjectGrades(this.currentConfig);
-        }
-      });
-    });
-
-    // Inputs: Item Weight
+    // Item Weight Input (surgical live update!)
     this.containerEl.querySelectorAll<HTMLInputElement>('.cursa-item-weight-input').forEach((inp) => {
-      inp.addEventListener('change', () => {
+      inp.addEventListener('input', () => {
         const idx = parseInt(inp.getAttribute('data-idx') || '0', 10);
-        const val = parseFloat(inp.value) || 0;
-        if (this.currentConfig && this.currentConfig.items[idx]) {
+        const val = parseFloat(inp.value);
+        if (this.currentConfig && this.currentConfig.items[idx] && !isNaN(val)) {
           this.currentConfig.items[idx].weight = Math.max(0, Math.min(100, val));
           saveSubjectGrades(this.currentConfig);
-          this.render();
+          this.updateLiveMetricsInPlace();
         }
       });
     });
 
-    // Inputs: Item Grade
-    this.containerEl.querySelectorAll<HTMLInputElement>('.cursa-item-grade-input').forEach((inp) => {
+    // Item-level Cutoff Input (surgical live update!)
+    this.containerEl.querySelectorAll<HTMLInputElement>('.cursa-item-cutoff-input').forEach((inp) => {
       inp.addEventListener('change', () => {
         const idx = parseInt(inp.getAttribute('data-idx') || '0', 10);
-        const val = inp.value.trim() === '' ? null : parseFloat(inp.value);
-        if (this.currentConfig && this.currentConfig.items[idx]) {
-          this.currentConfig.items[idx].grade = val !== null && !isNaN(val) ? Math.max(0, Math.min(10, val)) : null;
+        if (!this.currentConfig || !this.currentConfig.items[idx]) return;
+        const val = inp.value.trim() === '' ? undefined : parseFloat(inp.value);
+        if (val !== undefined && !isNaN(val) && val > 0) {
+          this.currentConfig.items[idx].minGradeRequired = Math.min(10, val);
+          inp.classList.add('active');
+        } else {
+          this.currentConfig.items[idx].minGradeRequired = undefined;
+          inp.classList.remove('active');
+        }
+        saveSubjectGrades(this.currentConfig);
+        this.updateLiveMetricsInPlace();
+      });
+    });
+
+    // Dual-Mode Grade / What-If Input (surgical live update, zero focus loss!)
+    this.containerEl.querySelectorAll<HTMLInputElement>('.cursa-item-grade-input').forEach((inp) => {
+      inp.addEventListener('input', () => {
+        const idx = parseInt(inp.getAttribute('data-idx') || '0', 10);
+        const itemId = inp.getAttribute('data-item-id') || '';
+        const mode = inp.getAttribute('data-mode') || 'real';
+        if (!this.currentConfig || !this.currentConfig.items[idx]) return;
+
+        const raw = inp.value.trim();
+        const parsed = raw === '' ? null : parseFloat(raw);
+        const clamped = parsed !== null && !isNaN(parsed) ? Math.max(0, Math.min(10, parsed)) : null;
+
+        if (mode === 'sim') {
+          if (clamped !== null) {
+            this.simulatedGrades[itemId] = clamped;
+          } else {
+            delete this.simulatedGrades[itemId];
+          }
+          inp.classList.toggle('simulated', true);
+          this.updateLiveMetricsInPlace();
+        } else {
+          this.currentConfig.items[idx].grade = clamped;
+          if (clamped !== null) {
+            delete this.simulatedGrades[itemId];
+            this.simInputModeIds.delete(itemId);
+          }
+          inp.classList.toggle('graded', clamped !== null);
           saveSubjectGrades(this.currentConfig);
-          this.render();
+          this.updateLiveMetricsInPlace();
         }
       });
     });
 
-    // Delete item
+    // Toggle What-If Simulation Mode on Pending Item
+    this.containerEl.querySelectorAll<HTMLButtonElement>('.cursa-sim-mode-btn').forEach((btn) => {
+      btn.addEventListener('click', () => {
+        const itemId = btn.getAttribute('data-item-id') || '';
+        if (!itemId) return;
+        if (this.simInputModeIds.has(itemId) || itemId in this.simulatedGrades) {
+          this.simInputModeIds.delete(itemId);
+          delete this.simulatedGrades[itemId];
+        } else {
+          this.simInputModeIds.add(itemId);
+        }
+        this.render();
+        const nextInput = this.containerEl?.querySelector<HTMLInputElement>(`.cursa-item-grade-input[data-item-id="${CSS.escape(itemId)}"]`);
+        nextInput?.focus();
+      });
+    });
+
+    // Delete Item
     this.containerEl.querySelectorAll<HTMLButtonElement>('.cursa-del-item-btn').forEach((btn) => {
       btn.addEventListener('click', () => {
         const idx = parseInt(btn.getAttribute('data-idx') || '0', 10);
         if (this.currentConfig && this.currentConfig.items[idx]) {
+          const removed = this.currentConfig.items[idx];
+          delete this.simulatedGrades[removed.id];
           this.currentConfig.items.splice(idx, 1);
           saveSubjectGrades(this.currentConfig);
           this.render();
@@ -1690,14 +1588,13 @@ private getTargetStatusColors(targetCalc: ReturnType<typeof calculateTargetRequi
       });
     });
 
-    // Link Calendar Event Button
+    // Link / Unlink Calendar Event
     this.containerEl.querySelectorAll<HTMLButtonElement>('.cursa-link-cal-btn').forEach((btn) => {
       btn.addEventListener('click', () => {
         const idx = parseInt(btn.getAttribute('data-idx') || '0', 10);
         if (!this.currentConfig || !this.currentConfig.items[idx]) return;
         const item = this.currentConfig.items[idx];
 
-        // Hide overlay container temporarily
         const overlay = document.getElementById('cursa-grades-view-overlay');
         if (overlay) overlay.style.display = 'none';
 
@@ -1720,7 +1617,6 @@ private getTargetStatusColors(targetCalc: ReturnType<typeof calculateTargetRequi
       });
     });
 
-    // Unlink Calendar Event Button
     this.containerEl.querySelectorAll<HTMLButtonElement>('.cursa-unlink-btn').forEach((btn) => {
       btn.addEventListener('click', () => {
         const idx = parseInt(btn.getAttribute('data-idx') || '0', 10);
@@ -1733,73 +1629,21 @@ private getTargetStatusColors(targetCalc: ReturnType<typeof calculateTargetRequi
       });
     });
 
-    // Cutoff Input
-    const cutoffInput = this.containerEl.querySelector('#cursa-cutoff-input') as HTMLInputElement;
-    cutoffInput?.addEventListener('change', () => {
-      const val = cutoffInput.value.trim() === '' ? undefined : parseFloat(cutoffInput.value);
-      if (this.currentConfig) {
-        this.currentConfig.minFinalGradeRequired = val && !isNaN(val) ? val : undefined;
-        saveSubjectGrades(this.currentConfig);
-        this.render();
-      }
-    });
-
-    // Quick Target Buttons
-    this.containerEl.querySelectorAll<HTMLButtonElement>('.cursa-target-btn').forEach((btn) => {
-      btn.addEventListener('click', () => {
-        const target = parseFloat(btn.getAttribute('data-target') || '5.0');
-        this.currentTarget = target;
-        this.render();
-      });
-    });
-
-    // Slider: update simulation readout in-place on `input` so continuous pointer/keyboard drag is preserved
-    const slider = this.containerEl.querySelector('#cursa-sim-slider') as HTMLInputElement;
-    slider?.addEventListener('input', () => {
-      this.simulatedScore = parseFloat(slider.value);
-      this.updateSimulationCardLive();
-    });
-  }
-
-  private updateSimulationCardLive(): void {
-    if (!this.containerEl || !this.currentConfig) return;
-    const simResult = calculateSimulatedFinalGrade(
-      this.currentConfig.items,
-      this.simulatedScore,
-      this.currentConfig.minFinalGradeRequired,
-      this.currentConfig.blockCutoffs
-    );
-    const simStatus = this.getSimStatusColors(simResult);
-
-    const scoreValEl = this.containerEl.querySelector('#cursa-sim-score-val') as HTMLElement | null;
-    if (scoreValEl) {
-      scoreValEl.textContent = this.simulatedScore.toFixed(1);
-    }
-
-    const gradeValEl = this.containerEl.querySelector('#cursa-sim-final-grade-val') as HTMLElement | null;
-    if (gradeValEl) {
-      gradeValEl.textContent = simResult.finalGrade.toFixed(2);
-    }
-
-    const gradeBoxEl = this.containerEl.querySelector('#cursa-sim-final-grade-box') as HTMLElement | null;
-    if (gradeBoxEl) {
-      gradeBoxEl.style.color = simStatus.simStatusColor;
-    }
-
-    const badgeEl = this.containerEl.querySelector('#cursa-sim-status-badge') as HTMLElement | null;
-    if (badgeEl) {
-      badgeEl.textContent = simStatus.simStatusLabel;
-      badgeEl.style.color = simStatus.simStatusColor;
-      badgeEl.style.background = simStatus.simStatusBg;
-      badgeEl.style.borderColor = simStatus.simStatusBorder;
-    }
+    this.bindTargetButtons();
+    this.bindScenarioControls();
+    this.bindNormalizeButton();
   }
 
   private openAIChat(): void {
     const credits = this.currentConfig?.credits || 6;
-    GradesChatModal.getInstance().open(this.activeSubject, credits, (newConfig) => {
-      this.currentConfig = newConfig;
-      this.loadSubject(this.activeSubject);
-    });
+    GradesChatModal.getInstance().open(
+      this.activeSubject,
+      credits,
+      (newConfig) => {
+        this.currentConfig = newConfig;
+        this.loadSubject(this.activeSubject);
+      },
+      this.currentConfig
+    );
   }
 }

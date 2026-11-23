@@ -5,7 +5,12 @@ import {
   calculateAccumulatedScore,
   calculateTargetRequiredGrade,
   calculateSimulatedFinalGrade,
-  groupGradeItems
+  calculateScenarioSimulation,
+  evaluateCutoffs,
+  groupGradeItems,
+  normalizeWeightsTo100,
+  mergeSyllabusPreservingData,
+  calculateTermSummary
 } from '../shared/gradesCalculator';
 import { GeminiGradesService } from '../injected/services/geminiGradesService';
 import { getSubjectGrades, saveSubjectGrades, deleteSubjectGrades } from '../injected/services/gradesStorage';
@@ -397,6 +402,83 @@ Tema 4: 20% Memoria técnica + 80% Examen.`;
     const res2 = service.extractSyllabusOfflineFallback('Sistemas', '50% teoría y 50% prácticas');
     assert.strictEqual(res2.items.reduce((s, it) => s + it.weight, 0), 100);
     assert.ok(!res2.items.some((it) => it.dateHint === '25/01/2027'));
+  });
+
+  it('enforces item-level cutoffs, per-item What-If simulation, weight normalization, and data-preserving merge', () => {
+    const items: GradeItem[] = [
+      { id: 't1', name: 'Test', type: 'EXAMEN', weight: 15, grade: 8.0, category: 'Teoría' },
+      { id: 't2', name: 'Examen de problemas', type: 'EXAMEN', weight: 35, grade: null, minGradeRequired: 4.5, category: 'Teoría' },
+      { id: 'p1', name: 'Prácticas Lab', type: 'ENTREGA', weight: 50, grade: 9.0, category: 'Prácticas' }
+    ];
+
+    // Accumulated = 1.2 + 4.5 = 5.70 (already > 5.0!), but Examen de problemas has item cutoff 4.5
+    const target = calculateTargetRequiredGrade(items, 5.0, null, { Teoría: 4.0, Prácticas: 4.0 });
+    assert.strictEqual(target.requiredFinalGrade, 4.5);
+    assert.strictEqual(target.isCutoffTriggered, true);
+    assert.ok(target.bottleneckReason?.includes('Examen de problemas'));
+
+    // Per-item What-If simulation: if student simulates 4.0 in t2 -> fails 4.5 item cutoff even though finalGrade is 7.10
+    const simFail = calculateScenarioSimulation(items, { t2: 4.0 }, 5.0, null, { Teoría: 4.0, Prácticas: 4.0 });
+    assert.strictEqual(simFail.finalGrade, 7.1);
+    assert.strictEqual(simFail.isCutoffFailed, true);
+    assert.strictEqual(simFail.simulatedItemCount, 1);
+
+    // If student simulates 5.0 in t2 -> passes all cutoffs!
+    const simOk = calculateScenarioSimulation(items, { t2: 5.0 }, 5.0, null, { Teoría: 4.0, Prácticas: 4.0 });
+    assert.strictEqual(simOk.finalGrade, 7.45);
+    assert.strictEqual(simOk.isCutoffFailed, false);
+
+    // Real grade on t2 was never mutated
+    assert.strictEqual(items[1].grade, null);
+
+    // Evaluate cutoffs diagnostics
+    const diags = evaluateCutoffs(items, null, { Teoría: 4.0, Prácticas: 4.0 }, { t2: 4.0 });
+    assert.ok(diags.some((d) => d.scope === 'ITEM' && d.itemId === 't2' && d.status === 'AT_RISK'));
+
+    // Weight normalization to 100%
+    const normalized = normalizeWeightsTo100([
+      { id: 'a', name: 'A', type: 'EXAMEN', weight: 20, grade: null },
+      { id: 'b', name: 'B', type: 'ENTREGA', weight: 60, grade: null }
+    ]);
+    assert.strictEqual(normalized[0].weight, 25);
+    assert.strictEqual(normalized[1].weight, 75);
+
+    // Smart merge preserves existing grades & calendar links
+    const merged = mergeSyllabusPreservingData(
+      [
+        { id: 'new1', name: 'Test', type: 'EXAMEN', weight: 20, grade: null, category: 'Teoría' },
+        { id: 'new2', name: 'Examen de problemas', type: 'EXAMEN', weight: 30, grade: null, minGradeRequired: 4.5, category: 'Teoría' }
+      ],
+      {
+        subjectName: 'Arquitectura',
+        credits: 6,
+        items: [
+          { id: 'old1', name: 'Test', type: 'EXAMEN', weight: 15, grade: 8.25, category: 'Teoría', linkedCalendarEventId: 'evt_123', linkedEventTitle: 'Test T1-T2' }
+        ],
+        updatedAt: Date.now()
+      }
+    );
+    assert.strictEqual(merged[0].grade, 8.25);
+    assert.strictEqual(merged[0].linkedCalendarEventId, 'evt_123');
+    assert.strictEqual(merged[0].linkedEventTitle, 'Test T1-T2');
+
+    // Term summary weighted by ECTS
+    const termSummary = calculateTermSummary([
+      {
+        subjectName: 'Arquitectura',
+        color: '#3b82f6',
+        config: { subjectName: 'Arquitectura', credits: 6, items, updatedAt: Date.now() }
+      },
+      {
+        subjectName: 'Algoritmos',
+        color: '#10b981',
+        config: null
+      }
+    ]);
+    assert.strictEqual(termSummary.totalSubjects, 2);
+    assert.strictEqual(termSummary.configuredSubjects, 1);
+    assert.strictEqual(termSummary.totalCredits, 12);
+    assert.ok(termSummary.weightedAverageCurrent !== null && termSummary.weightedAverageCurrent > 8.5);
   });
 });
 

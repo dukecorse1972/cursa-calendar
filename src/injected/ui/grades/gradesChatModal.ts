@@ -1,14 +1,27 @@
 import { safeSetInnerHTML, escapeHtml, setupFocusTrap } from '../../utils/dom';
 import { GeminiGradesService } from '../../services/geminiGradesService';
-import { AISyllabusExtraction, SubjectGradesConfig } from '../../../shared/gradesTypes';
-import { decomposeCompositeItems } from '../../../shared/gradesCalculator';
+import {
+  AISyllabusExtraction,
+  GradesChatTurn,
+  SubjectGradesConfig
+} from '../../../shared/gradesTypes';
+import {
+  decomposeCompositeItems,
+  mergeSyllabusPreservingData
+} from '../../../shared/gradesCalculator';
 import { saveSubjectGrades } from '../../services/gradesStorage';
+import { GRADES_ICONS } from './gradesIcons';
+import { injectGradesStyles } from './gradesStyles';
+import { ThemeManager } from '../../theme/ThemeManager';
 
 export class GradesChatModal {
   private static instance: GradesChatModal | null = null;
   private overlayEl: HTMLElement | null = null;
   private currentSubject: string = '';
   private currentCredits: number = 6;
+  private existingConfig: SubjectGradesConfig | null = null;
+  private preserveExistingData: boolean = true;
+  private history: GradesChatTurn[] = [];
   private onFinished: ((config: SubjectGradesConfig) => void) | null = null;
   private focusTrapCleanup: (() => void) | null = null;
   private pendingExtraction: AISyllabusExtraction | null = null;
@@ -23,9 +36,18 @@ export class GradesChatModal {
 
   private constructor() {}
 
-  public open(subjectName: string, credits: number, onFinished: (config: SubjectGradesConfig) => void): void {
+  public open(
+    subjectName: string,
+    credits: number,
+    onFinished: (config: SubjectGradesConfig) => void,
+    existingConfig: SubjectGradesConfig | null = null
+  ): void {
+    injectGradesStyles();
     this.currentSubject = subjectName;
     this.currentCredits = credits || 6;
+    this.existingConfig = existingConfig;
+    this.preserveExistingData = true;
+    this.history = [];
     this.onFinished = onFinished;
     this.pendingExtraction = null;
     this.isThinking = false;
@@ -51,260 +73,136 @@ export class GradesChatModal {
 
     const overlay = document.createElement('div');
     overlay.id = 'cursa-grades-chat-modal-overlay';
-    overlay.style.cssText = `
-      position: fixed;
-      top: 0;
-      left: 0;
-      width: 100vw;
-      height: 100vh;
-      background: rgba(32, 33, 36, 0.6);
-      z-index: 9999999;
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      backdrop-filter: blur(6px);
-      -webkit-backdrop-filter: blur(6px);
-      font-family: 'Google Sans', 'Google Sans Text', Roboto, -apple-system, sans-serif;
-      box-sizing: border-box;
-      padding: 20px;
-    `;
+    overlay.setAttribute('data-cg-theme', ThemeManager.getInstance().getTheme() === 'DARK' ? 'dark' : 'light');
 
     const geminiService = GeminiGradesService.getInstance();
     const hasKey = geminiService.hasApiKey();
+    const hasExisting = Boolean(this.existingConfig && this.existingConfig.items.length > 0);
 
     safeSetInnerHTML(
       overlay,
       `
-      <div id="cursa-grades-chat-card" style="
-        background: var(--gcal-surface, #282a2d);
-        color: var(--gcal-text, #e8eaed);
-        border: 1px solid var(--gcal-border, #444746);
-        border-radius: 24px;
-        width: 720px;
-        max-width: 94vw;
-        height: 640px;
-        max-height: 92vh;
-        display: flex;
-        flex-direction: column;
-        box-shadow: 0 24px 48px rgba(0, 0, 0, 0.4);
-        overflow: hidden;
-      ">
-        <!-- Header (Google Gemini in Workspace Style) -->
-        <div style="
-          padding: 18px 24px;
-          border-bottom: 1px solid var(--gcal-border, #444746);
-          display: flex;
-          align-items: center;
-          justify-content: space-between;
-          background: var(--gcal-surface, #282a2d);
-        ">
+      <div id="cursa-grades-chat-card" class="cg-chat-card">
+        <div class="cg-chat-header">
           <div style="display: flex; align-items: center; gap: 12px;">
             <div style="
-              width: 38px;
-              height: 38px;
-              border-radius: 12px;
-              background: linear-gradient(135deg, #1a73e8 0%, #4285f4 50%, #9b72cb 100%);
+              width: 36px;
+              height: 36px;
+              border-radius: 10px;
+              background: linear-gradient(135deg, #2563eb 0%, #7c3aed 100%);
               display: flex;
               align-items: center;
               justify-content: center;
-              font-size: 18px;
-              color: white;
-              box-shadow: 0 2px 8px rgba(26, 115, 232, 0.3);
-            ">✨</div>
+              color: #ffffff;
+              flex-shrink: 0;
+            ">${GRADES_ICONS.sparkles(18)}</div>
             <div>
-              <div style="display: flex; align-items: center; gap: 8px;">
-                <span style="font-weight: 500; font-size: 16px; font-family: 'Google Sans', Roboto, sans-serif; color: var(--gcal-text, #e8eaed);">Gemini • Asistente de Guía Docente</span>
-                <span style="font-size: 11.5px; background: rgba(138, 180, 248, 0.15); color: var(--gcal-accent, #8ab4f8); font-weight: 600; padding: 2px 8px; border-radius: 10px; border: 1px solid rgba(138, 180, 248, 0.3);">${escapeHtml(this.currentSubject)}</span>
+              <div style="display: flex; align-items: center; gap: 8px; flex-wrap: wrap;">
+                <span style="font-weight: 600; font-size: 15px;">Asistente de Guía Docente</span>
+                <span class="cg-pill cg-pill-accent">${escapeHtml(this.currentSubject)}</span>
               </div>
-              <div style="font-size: 12px; color: var(--gcal-secondary-text, #9aa0a6); margin-top: 2px;">
-                Google AI Studio • Modelo Gemini 2.5 Flash
+              <div style="font-size: 12px; color: var(--cg-muted); margin-top: 1px;">
+                Gemini 2.5 Flash · Conversación multi-turno con cortes por ítem y bloque
               </div>
             </div>
           </div>
-          <button id="cursa-chat-close-btn" style="
-            background: none;
-            border: none;
-            font-size: 20px;
-            cursor: pointer;
-            color: var(--gcal-secondary-text, #9aa0a6);
-            border-radius: 50%;
-            width: 36px;
-            height: 36px;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            transition: background 0.15s ease;
-          " onmouseover="this.style.background='var(--gcal-surface-hover, #35373b)';" onmouseout="this.style.background='none';">&times;</button>
+          <button id="cursa-chat-close-btn" type="button" class="cg-btn cg-btn-ghost" style="width: 32px; height: 32px; padding: 0; justify-content: center;" title="Cerrar">
+            ${GRADES_ICONS.x(16)}
+          </button>
         </div>
 
-        <!-- API Key Banner if not set -->
         <div id="cursa-api-key-banner" style="
           ${hasKey ? 'display: none;' : 'display: flex;'}
-          background: var(--gcal-surface-hover, #35373b);
-          border-bottom: 1px solid var(--gcal-border, #444746);
-          color: var(--gcal-text, #e8eaed);
-          padding: 12px 20px;
-          font-size: 12.5px;
+          background: var(--cg-surface-2);
+          border-bottom: 1px solid var(--cg-border);
+          padding: 10px 18px;
+          font-size: 12px;
           flex-direction: column;
           gap: 8px;
         ">
-          <div style="display: flex; justify-content: space-between; align-items: center;">
-            <span>🔑 <strong>Clave de Gemini API</strong> (100% gratuita en Google AI Studio):</span>
-            <a href="https://aistudio.google.com/app/apikey" target="_blank" style="color: var(--gcal-accent, #8ab4f8); font-weight: 600; text-decoration: none;">Obtener gratis en Google AI Studio ↗</a>
+          <div style="display: flex; justify-content: space-between; align-items: center; gap: 8px; flex-wrap: wrap;">
+            <span><strong>Clave de Gemini API</strong> (gratuita en Google AI Studio):</span>
+            <a href="https://aistudio.google.com/app/apikey" target="_blank" style="color: var(--cg-accent); font-weight: 600; text-decoration: none;">Obtener gratis ↗</a>
           </div>
           <div style="display: flex; gap: 8px;">
             <input id="cursa-api-key-input" type="password" placeholder="Pega tu clave (AIzaSy...)" style="
               flex: 1;
-              padding: 6px 12px;
+              height: 30px;
+              padding: 0 10px;
               border-radius: 8px;
-              border: 1px solid var(--gcal-border, #444746);
+              border: 1px solid var(--cg-border);
               font-size: 12px;
-              background: var(--gcal-surface, #282a2d);
-              color: var(--gcal-text, #e8eaed);
+              background: var(--cg-bg);
+              color: var(--cg-text);
               outline: none;
             " />
-            <button id="cursa-api-key-save-btn" type="button" style="
-              background: #1a73e8;
-              color: #ffffff;
-              border: none;
-              padding: 6px 14px;
-              border-radius: 8px;
-              font-weight: 500;
-              font-size: 12px;
-              cursor: pointer;
-            ">Guardar Clave</button>
-            <button id="cursa-use-offline-btn" type="button" style="
-              background: var(--gcal-surface, #282a2d);
-              color: var(--gcal-text, #e8eaed);
-              border: 1px solid var(--gcal-border, #444746);
-              padding: 6px 12px;
-              border-radius: 8px;
-              font-size: 12px;
-              cursor: pointer;
-            ">Modo Local</button>
+            <button id="cursa-api-key-save-btn" type="button" class="cg-btn cg-btn-primary cg-btn-sm">Guardar</button>
+            <button id="cursa-use-offline-btn" type="button" class="cg-btn cg-btn-sm">Modo Local</button>
           </div>
         </div>
 
-        <!-- Messages scroll container -->
-        <div id="cursa-chat-messages" style="
-          flex: 1;
-          overflow-y: auto;
-          padding: 20px 24px;
-          display: flex;
-          flex-direction: column;
-          gap: 16px;
-          scrollbar-width: thin;
-        ">
-          <!-- Initial bot greeting -->
-          <div style="display: flex; gap: 12px; align-items: flex-start;">
+        ${
+          hasExisting
+            ? `<div style="
+                padding: 8px 18px;
+                background: var(--cg-accent-soft);
+                border-bottom: 1px solid var(--cg-accent-border);
+                display: flex;
+                align-items: center;
+                justify-content: space-between;
+                gap: 10px;
+                font-size: 12px;
+              ">
+                <label style="display: inline-flex; align-items: center; gap: 8px; cursor: pointer; color: var(--cg-text); font-weight: 500;">
+                  <input id="cursa-preserve-grades-chk" type="checkbox" checked style="accent-color: var(--cg-accent); cursor: pointer;" />
+                  <span>Conservar mis notas ya puestas y eventos de calendario vinculados</span>
+                </label>
+                <span style="color: var(--cg-muted);">${this.existingConfig!.items.length} hitos actuales</span>
+              </div>`
+            : ''
+        }
+
+        <div id="cursa-chat-messages" class="cg-chat-messages">
+          <div style="display: flex; gap: 10px; align-items: flex-start;">
             <div style="
-              width: 32px;
-              height: 32px;
-              border-radius: 50%;
-              background: linear-gradient(135deg, #1a73e8, #9b72cb);
-              color: white;
+              width: 28px;
+              height: 28px;
+              border-radius: 8px;
+              background: linear-gradient(135deg, #2563eb, #7c3aed);
+              color: #ffffff;
               display: flex;
               align-items: center;
               justify-content: center;
-              font-size: 15px;
               flex-shrink: 0;
-            ">✨</div>
-            <div style="
-              background: var(--gcal-surface-hover, #35373b);
-              border: 1px solid var(--gcal-border, #444746);
-              color: var(--gcal-text, #e8eaed);
-              padding: 16px 20px;
-              border-radius: 18px;
-              border-top-left-radius: 4px;
-              font-size: 13.5px;
-              line-height: 1.6;
-              max-width: 88%;
-            ">
-              ¡Hola! Explícame con tus palabras o pega el texto de la guía docente de <strong style="color: var(--gcal-accent, #8ab4f8);">${escapeHtml(this.currentSubject)}</strong>.
-              <p style="margin: 8px 0 0 0; color: var(--gcal-secondary-text, #9aa0a6); line-height: 1.5;">
-                Gemini desglosará automáticamente los bloques (Teoría, Prácticas), calculará los pesos finales, capturará las notas que ya tengas y aplicará las notas de corte obligatorias.
-              </p>
-
-              <!-- Quick Starters -->
-              <div style="display: flex; flex-wrap: wrap; gap: 8px; margin-top: 14px;">
-                <button type="button" class="cursa-quick-starter-btn" data-text="Estructura General: 50% Teoría y 50% Prácticas. Mínimo 4.0 en cada bloque para hacer media. Teoría: Test 30% y Examen 70%. Prácticas: 4 temas de 25% cada uno. Tema 1 ya obtenido con nota 7.33." style="
-                  background: var(--gcal-surface, #282a2d);
-                  border: 1px solid var(--gcal-border, #444746);
-                  color: var(--gcal-accent, #8ab4f8);
-                  padding: 8px 14px;
-                  border-radius: 14px;
-                  font-size: 12px;
-                  font-weight: 500;
-                  cursor: pointer;
-                  text-align: left;
-                  transition: all 0.15s ease;
-                " onmouseover="this.style.background='var(--gcal-selected, rgba(138, 180, 248, 0.15))';" onmouseout="this.style.background='var(--gcal-surface, #282a2d)';">
-                  📋 Ejemplo: 50% Teoría + 50% Prácticas (Nota previa 7.33)
+            ">${GRADES_ICONS.sparkles(14)}</div>
+            <div class="cg-chat-bubble-bot">
+              <div>
+                ${
+                  hasExisting
+                    ? `Tengo en cuenta tu configuración actual de <strong>${escapeHtml(this.currentSubject)}</strong>. Dime qué quieres cambiar o pega la guía docente completa.`
+                    : `Explícame con tus palabras o pega la guía docente de <strong>${escapeHtml(this.currentSubject)}</strong>.`
+                }
+              </div>
+              <div style="margin-top: 6px; color: var(--cg-muted); font-size: 12.5px;">
+                Puedo separar bloques y temas, calcular pesos globales, detectar notas mínimas <em>por bloque</em> o <em>por examen concreto</em>, y puedes pedirme correcciones en varios mensajes.
+              </div>
+              <div style="display: flex; flex-wrap: wrap; gap: 6px; margin-top: 12px;">
+                <button type="button" class="cg-btn cg-btn-sm cursa-quick-starter-btn" data-text="50% Teoría y 50% Prácticas. Mínimo 4.0 en cada bloque para hacer media. Teoría: Test 30% y Examen de problemas 70% (mínimo 4.0 en problemas). Prácticas: 4 temas de 25% cada uno; Tema 1 ya aprobado con 7.33.">
+                  50% Teoría + 50% Prácticas (con cortes)
                 </button>
-                <button type="button" class="cursa-quick-starter-btn" data-text="La evaluación se compone de un examen final del 70% con nota de corte mínima de 4.0, y evaluación continua del 30% consistente en entregas quincenales." style="
-                  background: var(--gcal-surface, #282a2d);
-                  border: 1px solid var(--gcal-border, #444746);
-                  color: var(--gcal-accent, #8ab4f8);
-                  padding: 8px 14px;
-                  border-radius: 14px;
-                  font-size: 12px;
-                  font-weight: 500;
-                  cursor: pointer;
-                  text-align: left;
-                  transition: all 0.15s ease;
-                " onmouseover="this.style.background='var(--gcal-selected, rgba(138, 180, 248, 0.15))';" onmouseout="this.style.background='var(--gcal-surface, #282a2d)';">
-                  📝 Ejemplo: Examen Final 70% (Corte 4.0) + Entregas 30%
+                <button type="button" class="cg-btn cg-btn-sm cursa-quick-starter-btn" data-text="Examen final 60% con nota mínima de 4.5, prácticas de laboratorio 25% y dos parciales que valen 15% en total.">
+                  Final 60% (corte 4.5) + Lab 25% + Parciales 15%
                 </button>
               </div>
             </div>
           </div>
         </div>
 
-        <!-- Chat Input Bar (Gemini Workspace Style) -->
-        <div style="
-          padding: 16px 20px;
-          border-top: 1px solid var(--gcal-border, #444746);
-          display: flex;
-          align-items: center;
-          gap: 10px;
-          background: var(--gcal-surface, #282a2d);
-        ">
-          <div style="
-            flex: 1;
-            display: flex;
-            align-items: center;
-            background: var(--gcal-surface-hover, #35373b);
-            border: 1px solid var(--gcal-border, #444746);
-            border-radius: 24px;
-            padding: 4px 16px;
-            transition: border-color 0.15s ease;
-          " id="cursa-chat-input-wrapper">
-            <input id="cursa-chat-input" type="text" placeholder="Escribe o pega aquí el desglose de la asignatura..." style="
-              flex: 1;
-              padding: 8px 0;
-              border: none;
-              background: transparent;
-              color: var(--gcal-text, #e8eaed);
-              font-size: 13.5px;
-              outline: none;
-              font-family: inherit;
-            " />
-          </div>
-          <button id="cursa-chat-send-btn" type="button" style="
-            width: 40px;
-            height: 40px;
-            border-radius: 50%;
-            background: var(--gcal-accent, #1a73e8);
-            color: #ffffff;
-            border: none;
-            cursor: pointer;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            font-size: 16px;
-            transition: opacity 0.15s ease, box-shadow 0.15s ease;
-            box-shadow: 0 1px 3px rgba(0,0,0,0.3);
-          " onmouseover="this.style.opacity='0.9';" onmouseout="this.style.opacity='1';">➤</button>
+        <div class="cg-chat-input-bar">
+          <textarea id="cursa-chat-input" class="cg-chat-textarea" rows="1" placeholder="Pega la guía docente o pide un ajuste... (Enter envía, Shift+Enter salto de línea)"></textarea>
+          <button id="cursa-chat-send-btn" type="button" class="cg-btn cg-btn-primary" style="width: 40px; height: 40px; padding: 0; justify-content: center; border-radius: 12px;" title="Enviar">
+            ${GRADES_ICONS.send(15)}
+          </button>
         </div>
       </div>
     `
@@ -320,70 +218,75 @@ export class GradesChatModal {
   private attachEventListeners(): void {
     if (!this.overlayEl) return;
 
-    // Close button
-    const closeBtn = this.overlayEl.querySelector('#cursa-chat-close-btn');
-    closeBtn?.addEventListener('click', () => this.close());
+    this.overlayEl.querySelector('#cursa-chat-close-btn')?.addEventListener('click', () => this.close());
+    this.overlayEl.addEventListener('click', (e) => {
+      if (e.target === this.overlayEl) this.close();
+    });
 
-    // API Key Save button
-    const apiKeyInput = this.overlayEl.querySelector('#cursa-api-key-input') as HTMLInputElement;
+    const preserveChk = this.overlayEl.querySelector('#cursa-preserve-grades-chk') as HTMLInputElement | null;
+    preserveChk?.addEventListener('change', () => {
+      this.preserveExistingData = preserveChk.checked;
+    });
+
+    const apiKeyInput = this.overlayEl.querySelector('#cursa-api-key-input') as HTMLInputElement | null;
     const apiKeySaveBtn = this.overlayEl.querySelector('#cursa-api-key-save-btn');
-    const apiKeyBanner = this.overlayEl.querySelector('#cursa-api-key-banner') as HTMLElement;
+    const apiKeyBanner = this.overlayEl.querySelector('#cursa-api-key-banner') as HTMLElement | null;
     const useOfflineBtn = this.overlayEl.querySelector('#cursa-use-offline-btn');
 
     apiKeySaveBtn?.addEventListener('click', () => {
       const key = apiKeyInput?.value?.trim();
       if (key) {
         GeminiGradesService.getInstance().setApiKey(key);
-        apiKeyBanner.style.display = 'none';
-        this.addBotMessage('✓ ¡Clave de Gemini guardada correctamente! Ahora cuéntame cómo te evalúan o usa uno de los ejemplos.');
+        if (apiKeyBanner) apiKeyBanner.style.display = 'none';
+        this.addBotMessage('Clave de Gemini guardada. Cuéntame cómo evalúan esta asignatura.');
       }
     });
 
     useOfflineBtn?.addEventListener('click', () => {
-      apiKeyBanner.style.display = 'none';
-      this.addBotMessage('ℹ️ Has activado el modo local. Procesaré tu texto con el motor universitario integrado.');
+      if (apiKeyBanner) apiKeyBanner.style.display = 'none';
+      this.addBotMessage('Modo local activado. Procesaré tu texto con el motor integrado.');
     });
 
-    // Quick starter chips
     this.overlayEl.querySelectorAll<HTMLButtonElement>('.cursa-quick-starter-btn').forEach((btn) => {
       btn.addEventListener('click', () => {
         const text = btn.getAttribute('data-text');
-        if (text) {
+        if (text && !this.isThinking) {
           this.addUserMessage(text);
           this.processUserMessage(text);
         }
       });
     });
 
-    // Chat Send
-    const chatInput = this.overlayEl.querySelector('#cursa-chat-input') as HTMLInputElement;
+    const chatInput = this.overlayEl.querySelector('#cursa-chat-input') as HTMLTextAreaElement | null;
     const chatSendBtn = this.overlayEl.querySelector('#cursa-chat-send-btn');
-    const inputWrapper = this.overlayEl.querySelector('#cursa-chat-input-wrapper') as HTMLElement;
 
-    chatInput?.addEventListener('focus', () => {
-      if (inputWrapper) inputWrapper.style.borderColor = '#1a73e8';
-    });
-    chatInput?.addEventListener('blur', () => {
-      if (inputWrapper) inputWrapper.style.borderColor = 'var(--gcal-border, #dadce0)';
-    });
+    const autoResize = () => {
+      if (!chatInput) return;
+      chatInput.style.height = 'auto';
+      chatInput.style.height = `${Math.min(130, Math.max(40, chatInput.scrollHeight))}px`;
+    };
+    chatInput?.addEventListener('input', autoResize);
 
     const handleSend = async () => {
       const text = chatInput?.value?.trim();
       if (!text || this.isThinking) return;
-
-      chatInput.value = '';
+      if (chatInput) {
+        chatInput.value = '';
+        chatInput.style.height = '40px';
+      }
       this.addUserMessage(text);
       await this.processUserMessage(text);
     };
 
     chatSendBtn?.addEventListener('click', handleSend);
     chatInput?.addEventListener('keydown', (e) => {
-      if (e.key === 'Enter') {
+      if (e.key === 'Enter' && !e.shiftKey) {
+        e.preventDefault();
         handleSend();
       }
     });
 
-    setTimeout(() => chatInput?.focus(), 100);
+    setTimeout(() => chatInput?.focus(), 80);
   }
 
   private addUserMessage(text: string): void {
@@ -392,77 +295,52 @@ export class GradesChatModal {
 
     const div = document.createElement('div');
     div.style.cssText = 'display: flex; justify-content: flex-end;';
-    div.innerHTML = `
-      <div style="
-        background: var(--gcal-selected, #004a77);
-        border: 1px solid var(--gcal-border, #444746);
-        color: var(--gcal-text, #e8eaed);
-        padding: 10px 16px;
-        border-radius: 18px;
-        border-top-right-radius: 4px;
-        font-size: 13.5px;
-        line-height: 1.5;
-        max-width: 80%;
-      ">${escapeHtml(text)}</div>
-    `;
+    safeSetInnerHTML(div, `<div class="cg-chat-bubble-user">${escapeHtml(text)}</div>`);
     container.appendChild(div);
     container.scrollTop = container.scrollHeight;
   }
 
-  private addBotMessage(html: string): void {
+  private addBotMessage(html: string): HTMLElement | null {
     const container = this.overlayEl?.querySelector('#cursa-chat-messages');
-    if (!container) return;
+    if (!container) return null;
 
     const div = document.createElement('div');
-    div.style.cssText = 'display: flex; gap: 12px; align-items: flex-start;';
+    div.style.cssText = 'display: flex; gap: 10px; align-items: flex-start;';
     safeSetInnerHTML(
       div,
       `
       <div style="
-        width: 32px;
-        height: 32px;
-        border-radius: 50%;
-        background: linear-gradient(135deg, #1a73e8, #9b72cb);
-        color: white;
+        width: 28px;
+        height: 28px;
+        border-radius: 8px;
+        background: linear-gradient(135deg, #2563eb, #7c3aed);
+        color: #ffffff;
         display: flex;
         align-items: center;
         justify-content: center;
-        font-size: 15px;
         flex-shrink: 0;
-      ">✨</div>
-      <div style="
-        background: var(--gcal-surface-hover, #35373b);
-        border: 1px solid var(--gcal-border, #444746);
-        color: var(--gcal-text, #e8eaed);
-        padding: 16px 20px;
-        border-radius: 18px;
-        border-top-left-radius: 4px;
-        font-size: 13.5px;
-        line-height: 1.6;
-        max-width: 88%;
-      ">${html}</div>
+      ">${GRADES_ICONS.sparkles(14)}</div>
+      <div class="cg-chat-bubble-bot">${html}</div>
     `
     );
     container.appendChild(div);
     container.scrollTop = container.scrollHeight;
+    return div;
   }
 
   private async processUserMessage(text: string): Promise<void> {
     this.isThinking = true;
+    this.history.push({ role: 'user', text });
+
     const container = this.overlayEl?.querySelector('#cursa-chat-messages');
     const loadingId = 'cursa-chat-loading-indicator';
 
     if (container) {
       const loadingDiv = document.createElement('div');
       loadingDiv.id = loadingId;
-      loadingDiv.style.cssText = 'display: flex; gap: 12px; align-items: center; color: var(--gcal-secondary-text, #9aa0a6); font-size: 13px; padding-left: 44px;';
-      safeSetInnerHTML(
-        loadingDiv,
-        `
-        <div style="width: 18px; height: 18px; border: 2px solid var(--gcal-accent, #8ab4f8); border-top-color: transparent; border-radius: 50%; animation: spin 0.8s linear infinite;"></div>
-        <span>Razonando con Gemini 2.5 Flash...</span>
-      `
-      );
+      loadingDiv.style.cssText =
+        'display: flex; gap: 10px; align-items: center; color: var(--cg-muted); font-size: 12.5px; padding-left: 38px;';
+      safeSetInnerHTML(loadingDiv, `<div class="cg-spinner"></div><span>Analizando estructura y reglas de corte...</span>`);
       container.appendChild(loadingDiv);
       container.scrollTop = container.scrollHeight;
     }
@@ -472,21 +350,26 @@ export class GradesChatModal {
 
     try {
       if (geminiService.hasApiKey()) {
-        extraction = await geminiService.extractSyllabus(this.currentSubject, text);
+        extraction = await geminiService.extractSyllabusMultiTurn(
+          this.currentSubject,
+          this.history,
+          this.existingConfig
+        );
       } else {
-        await new Promise((r) => setTimeout(r, 600));
+        await new Promise((r) => setTimeout(r, 350));
         extraction = geminiService.extractSyllabusOfflineFallback(this.currentSubject, text);
       }
     } catch (err: any) {
       document.getElementById(loadingId)?.remove();
       this.isThinking = false;
+      this.history.pop();
 
       if (err.message === 'NO_API_KEY') {
-        const apiKeyBanner = this.overlayEl?.querySelector('#cursa-api-key-banner') as HTMLElement;
+        const apiKeyBanner = this.overlayEl?.querySelector('#cursa-api-key-banner') as HTMLElement | null;
         if (apiKeyBanner) apiKeyBanner.style.display = 'flex';
-        this.addBotMessage('Para un razonamiento de IA avanzado, introduce tu clave de Gemini arriba. También puedes pulsar "Modo Local" para continuar.');
+        this.addBotMessage('Introduce tu clave de Gemini arriba o pulsa <strong>Modo Local</strong> para continuar.');
       } else {
-        this.addBotMessage(`⚠️ ${escapeHtml(err.message)}<br/><br/><em>Reinténtalo o pulsa "Modo Local".</em>`);
+        this.addBotMessage(`${escapeHtml(err.message)}<br/><span style="color: var(--cg-muted);">Puedes reintentarlo o usar el Modo Local.</span>`);
       }
       return;
     }
@@ -494,137 +377,98 @@ export class GradesChatModal {
     document.getElementById(loadingId)?.remove();
     this.isThinking = false;
     this.pendingExtraction = extraction;
+    this.history.push({ role: 'model', text: JSON.stringify(extraction) });
 
-    // Render structured preview card (Google Workspace Card Style)
-    const totalWeight = extraction.items.reduce((s, it) => s + it.weight, 0);
-    const isSum100 = totalWeight === 100;
+    const totalWeight = Math.round(extraction.items.reduce((s, it) => s + it.weight, 0) * 10) / 10;
+    const isSum100 = Math.abs(totalWeight - 100) < 0.05;
 
     const itemsHtml = extraction.items
-      .map(
-        (it) => `
-        <div style="
-          display: flex;
-          justify-content: space-between;
-          align-items: center;
-          padding: 8px 0;
-          border-bottom: 1px solid var(--gcal-border, #444746);
-          font-size: 13px;
-        ">
-          <div>
-            <span style="font-weight: 500; color: var(--gcal-text, #e8eaed);">${it.type === 'EXAMEN' ? '📋' : it.type === 'ENTREGA' ? '🗓️' : '📝'} ${escapeHtml(it.name)}</span>
-            ${
-              it.grade !== null && it.grade !== undefined
-                ? `<span style="
-                    margin-left: 8px;
-                    font-size: 11.5px;
-                    color: #81c995;
-                    font-weight: 600;
-                    background: rgba(129, 201, 149, 0.15);
-                    border: 1px solid rgba(129, 201, 149, 0.3);
-                    padding: 2px 8px;
-                    border-radius: 6px;
-                  ">Nota: ${it.grade.toFixed(2)}</span>`
-                : ''
-            }
-            ${
-              it.dateHint
-                ? `<span style="margin-left: 8px; font-size: 11.5px; color: var(--gcal-secondary-text, #9aa0a6);">📅 ${escapeHtml(it.dateHint)}</span>`
-                : ''
-            }
-          </div>
-          <span style="
-            font-weight: 600;
-            color: var(--gcal-accent, #8ab4f8);
-            background: rgba(138, 180, 248, 0.15);
-            border: 1px solid rgba(138, 180, 248, 0.3);
-            padding: 3px 10px;
-            border-radius: 10px;
-            font-size: 12.5px;
-          ">${it.weight}%</span>
-        </div>
-      `
-      )
-      .join('');
-
-    const previewHtml = `
-      <div>
-        <p style="margin: 0 0 12px 0; font-size: 13.5px; color: var(--gcal-text, #e8eaed); line-height: 1.5;">
-          ${escapeHtml(extraction.aiExplanation)}
-        </p>
-        <div style="
-          background: var(--gcal-surface, #282a2d);
-          border: 1px solid var(--gcal-border, #444746);
-          border-radius: 14px;
-          padding: 14px 16px;
-          margin-bottom: 14px;
-          box-shadow: 0 1px 3px rgba(0,0,0,0.2);
-        ">
-          <div style="
-            font-size: 11px;
-            font-weight: 600;
-            text-transform: uppercase;
-            letter-spacing: 0.8px;
-            color: var(--gcal-secondary-text, #9aa0a6);
-            margin-bottom: 8px;
-          ">
-            Propuesta de Configuración
-          </div>
-          ${itemsHtml}
+      .map((it) => {
+        const pathLabel = [it.category, it.subcategory].filter(Boolean).join(' · ');
+        return `
           <div style="
             display: flex;
             justify-content: space-between;
             align-items: center;
-            margin-top: 10px;
-            font-weight: 600;
-            font-size: 13px;
-            color: ${isSum100 ? '#81c995' : '#fdd663'};
+            gap: 10px;
+            padding: 7px 0;
+            border-bottom: 1px solid var(--cg-border-subtle);
+            font-size: 12.5px;
           ">
-            <span>Ponderación Total:</span>
-            <span>${totalWeight}% ${isSum100 ? '✓ (100% Correcto)' : `⚠️ (Suma ${totalWeight}%)`}</span>
+            <div style="min-width: 0;">
+              <div style="display: flex; align-items: center; gap: 6px; flex-wrap: wrap;">
+                <span class="cg-pill cg-pill-neutral" style="font-size: 10.5px; padding: 1px 6px;">${it.type}</span>
+                <span style="font-weight: 500; color: var(--cg-text);">${escapeHtml(it.name)}</span>
+                ${
+                  typeof it.minGradeRequired === 'number'
+                    ? `<span class="cg-pill cg-pill-warn" style="font-size: 10.5px; padding: 1px 6px;">Mín. ${it.minGradeRequired.toFixed(1)}</span>`
+                    : ''
+                }
+                ${
+                  it.grade !== null && it.grade !== undefined
+                    ? `<span class="cg-pill cg-pill-success" style="font-size: 10.5px; padding: 1px 6px;">Nota: ${it.grade.toFixed(2)}</span>`
+                    : ''
+                }
+              </div>
+              ${pathLabel ? `<div style="font-size: 11px; color: var(--cg-muted); margin-top: 2px;">${escapeHtml(pathLabel)}${it.dateHint ? ` · ${escapeHtml(it.dateHint)}` : ''}</div>` : ''}
+            </div>
+            <span class="cg-pill cg-pill-accent cg-num">${it.weight}%</span>
+          </div>
+        `;
+      })
+      .join('');
+
+    const blockCutoffsEntries = extraction.blockCutoffs ? Object.entries(extraction.blockCutoffs) : [];
+    const cutoffsSummaryHtml = [
+      ...blockCutoffsEntries.map(
+        ([blk, val]) => `<span class="cg-pill cg-pill-warn">${GRADES_ICONS.shield(12)} ${escapeHtml(blk)}: mín. ${val.toFixed(1)}</span>`
+      ),
+      ...(extraction.minFinalGradeRequired
+        ? [`<span class="cg-pill cg-pill-warn">${GRADES_ICONS.shield(12)} Examen final: mín. ${extraction.minFinalGradeRequired.toFixed(1)}</span>`]
+        : [])
+    ].join(' ');
+
+    const confirmId = `cursa-confirm-apply-${Date.now()}`;
+    const previewHtml = `
+      <div>
+        <p style="margin: 0 0 10px 0; font-size: 13px; line-height: 1.5;">
+          ${escapeHtml(extraction.aiExplanation)}
+        </p>
+        <div style="
+          background: var(--cg-surface);
+          border: 1px solid var(--cg-border);
+          border-radius: 12px;
+          padding: 12px 14px;
+          margin-bottom: 12px;
+        ">
+          <div style="font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.05em; color: var(--cg-muted); margin-bottom: 6px;">
+            Propuesta estructurada (${extraction.items.length} hitos)
+          </div>
+          ${itemsHtml}
+          <div style="display: flex; justify-content: space-between; align-items: center; margin-top: 10px; font-size: 12.5px; font-weight: 600;">
+            <span>Ponderación total</span>
+            <span class="${isSum100 ? 'cg-pill cg-pill-success' : 'cg-pill cg-pill-warn'} cg-num">
+              ${totalWeight}% ${isSum100 ? '· Cuadra al 100%' : '· Revisar suma'}
+            </span>
           </div>
           ${
-            extraction.minFinalGradeRequired
-              ? `<div style="
-                  margin-top: 8px;
-                  font-size: 12px;
-                  color: #fdd663;
-                  font-weight: 500;
-                  background: rgba(253, 214, 99, 0.12);
-                  border: 1px solid rgba(253, 214, 99, 0.3);
-                  padding: 6px 12px;
-                  border-radius: 8px;
-                ">
-                  🛡️ Nota de corte en Examen Final: ${extraction.minFinalGradeRequired.toFixed(2)} requerida para hacer media.
-                </div>`
+            cutoffsSummaryHtml
+              ? `<div style="display: flex; flex-wrap: wrap; gap: 6px; margin-top: 10px;">${cutoffsSummaryHtml}</div>`
               : ''
           }
         </div>
-        <div style="display: flex; gap: 10px; align-items: center;">
-          <button id="cursa-confirm-create-grades-btn" type="button" style="
-            background: var(--gcal-accent, #1a73e8);
-            color: #ffffff;
-            border: none;
-            padding: 9px 20px;
-            border-radius: 18px;
-            font-family: 'Google Sans', Roboto, sans-serif;
-            font-weight: 600;
-            font-size: 13.5px;
-            cursor: pointer;
-            box-shadow: 0 1px 3px rgba(0,0,0,0.3);
-            transition: opacity 0.15s ease;
-          " onmouseover="this.style.opacity='0.9';" onmouseout="this.style.opacity='1';">
-            ✓ Aplicar y Guardar en Simulador
+        <div style="display: flex; gap: 10px; align-items: center; flex-wrap: wrap;">
+          <button id="${confirmId}" type="button" class="cg-btn cg-btn-primary">
+            ${GRADES_ICONS.check(14)}
+            <span>Aplicar al Simulador</span>
           </button>
-          <span style="font-size: 12px; color: var(--gcal-secondary-text, #9aa0a6);">O escribe abajo si quieres ajustar algo.</span>
+          <span style="font-size: 12px; color: var(--cg-muted);">O escríbeme abajo para afinar cualquier detalle.</span>
         </div>
       </div>
     `;
 
-    this.addBotMessage(previewHtml);
-
-    // Attach click handler for creation button
-    const confirmBtn = this.overlayEl?.querySelector('#cursa-confirm-create-grades-btn');
-    confirmBtn?.addEventListener('click', () => {
+    const msgEl = this.addBotMessage(previewHtml);
+    msgEl?.querySelector(`#${confirmId}`)?.addEventListener('click', () => {
       this.finishAndCreate();
     });
   }
@@ -638,16 +482,24 @@ export class GradesChatModal {
       type: it.type,
       weight: it.weight,
       grade: it.grade !== undefined && it.grade !== null ? it.grade : null,
-      category: it.category,
-      subcategory: it.subcategory
+      minGradeRequired: it.minGradeRequired !== undefined && it.minGradeRequired !== null ? it.minGradeRequired : undefined,
+      dateHint: it.dateHint || undefined,
+      category: it.category || undefined,
+      subcategory: it.subcategory || undefined
     }));
+
+    const decomposed = decomposeCompositeItems(rawItems);
+    const finalItems =
+      this.preserveExistingData && this.existingConfig
+        ? mergeSyllabusPreservingData(decomposed, this.existingConfig)
+        : decomposed;
 
     const config: SubjectGradesConfig = {
       subjectName: this.currentSubject,
-      credits: this.currentCredits,
+      credits: this.existingConfig?.credits || this.currentCredits,
       minFinalGradeRequired: this.pendingExtraction.minFinalGradeRequired || undefined,
       blockCutoffs: this.pendingExtraction.blockCutoffs || undefined,
-      items: decomposeCompositeItems(rawItems),
+      items: finalItems,
       updatedAt: Date.now()
     };
 
